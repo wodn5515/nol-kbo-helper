@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.12
+// @version      1.1.13
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -935,13 +935,15 @@
       input.addEventListener('compositionupdate', () => setTimeout(convertIfNeeded, 0));
 
       // 페이지가 input 을 display:none 으로 숨겨둬서 focus 불가인 경우 → 강제 visible
+      // ★ 중요: CAPTCHA 오버레이가 active 일 때만 동작. 해제 후엔 절대 DOM 건드리지 않음
+      //   (이전 버전은 해제 후에도 guardObs 가 계속 style 바꿔서 후속 flow 에서
+      //    '비정상 경로' 탐지 유발)
       const forceVisible = () => {
         if (!input.isConnected) return;
-        // 1) inline display:none 제거 + !important 로 visible 강제
+        if (!captchaActive()) return;
         input.style.setProperty('display', 'inline-block', 'important');
         input.style.setProperty('visibility', 'visible', 'important');
         input.style.setProperty('opacity', '1', 'important');
-        // 2) 같은 컨테이너(.validationTxt 등) 의 placeholder span 숨김 (겹침 방지)
         const parent = input.parentElement;
         if (parent) {
           parent.querySelectorAll('span').forEach(sp => {
@@ -951,12 +953,12 @@
       };
       forceVisible();
 
-      // focus (강제로 보이게 한 뒤 시도)
       let focusedOnce = false;
       const tryFocus = () => {
         if (!input.isConnected) return;
+        if (!captchaActive()) return;
         if (focusedOnce && document.activeElement === input) return;
-        if (input.offsetParent === null) return; // 아직 렌더링 안됨
+        if (input.offsetParent === null) return;
         try { input.focus(); input.select(); } catch (_) {}
         if (document.activeElement === input) {
           if (!focusedOnce) log('CAPTCHA 입력란 focus 성공');
@@ -966,8 +968,13 @@
       tryFocus();
       [50, 150, 400, 1000].forEach(d => setTimeout(tryFocus, d));
 
-      // 페이지 JS 가 display 다시 none 으로 되돌리는 경우 대비 → 감시해서 계속 visible 유지
+      // Guard observer — CAPTCHA 해제되면 즉시 disconnect (DOM 간섭 중단)
       const guardObs = new MutationObserver(() => {
+        if (!captchaActive()) {
+          guardObs.disconnect();
+          log('CAPTCHA 해제 — DOM guard 중지');
+          return;
+        }
         if (input.style.display === 'none' || getComputedStyle(input).display === 'none') {
           forceVisible();
         }
