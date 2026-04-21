@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.5
+// @version      2.1.6
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -87,6 +87,33 @@
 
   const log  = (...a) => console.log('%c[HELPER]', 'color:#0af;font-weight:bold', ...a);
   const warn = (...a) => console.warn('%c[HELPER]', 'color:#fa0;font-weight:bold', ...a);
+
+  // =========================================================
+  // [INTERPARK bug shim] jsonCallback JSONP race 무력화
+  //
+  // Captcha.js 가 $.ajax({dataType:'jsonp', jsonpCallback:'jsonCallback'}) 로
+  // 동일 전역 이름 재사용. 연속 호출 시 이전 응답 cleanup 이 다음 응답 전에
+  // 실행되면 "jsonCallback is not a function" TypeError 발생.
+  // 두산 페이지는 divBookNoticeLayer 닫기 → fnBookNoticeShowHide → capchaInit
+  // 이 이미 DOM ready 시점에 호출된 capchaInit 과 충돌해서 특히 자주 터짐.
+  //
+  // 실제 동작엔 무해 (이미지/입력은 정상) 지만 콘솔만 더럽힘. Accessor property
+  // 로 설치해서, jQuery 가 delete window.jsonCallback 해도 getter 는 noop 반환
+  // → 서버 응답이 jsonCallback(data) 호출해도 silent drop.
+  // configurable:false 로 delete 를 non-op 로 만들어 shim 이 영속.
+  // =========================================================
+  try {
+    let captured;  // jQuery 가 세팅하는 실제 handler 보관
+    const noop = function () {};
+    Object.defineProperty(window, 'jsonCallback', {
+      configurable: false,
+      enumerable: true,
+      get() { return typeof captured === 'function' ? captured : noop; },
+      set(v) { captured = v; }
+    });
+  } catch (e) {
+    console.warn('[HELPER] jsonCallback shim 설치 실패:', e.message);
+  }
 
   // =========================================================
   // CAPTCHA 게이트 — AUTO_FLOW 는 CAPTCHA 오버레이가 걷힌 뒤에만 진행
