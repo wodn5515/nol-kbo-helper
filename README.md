@@ -98,16 +98,22 @@ https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.use
 ### interpark-autoclick
 날짜는 패널 UI 로 입력 (localStorage 저장). 고급 설정 필요 없음.
 
-### seat-helper — GUI 다이얼로그로 설정
+### seat-helper — GUI 다이얼로그로 미리 설정
 
-`poticket.interpark.com` 예매 팝업에 진입하면 **우측 하단에 플로팅 ⚙️ 버튼** 자동 표시됨:
+예매 오픈 **전에 미리** KBO 구단 페이지에서 설정해두는 흐름 (예매창 들어가서 허둥지둥 안 하도록):
 
-1. **⚙️ 버튼 클릭** → 설정 모달 오픈
-2. 원하는 값 입력
-3. **"💾 저장 & 새로고침"** 클릭 → 자동으로 페이지 reload, 새 설정 적용
+1. `ticket.interpark.com/Contents/Sports/GoodsInfo?SportsCode=07001&TeamCode=PB004` 접속
+2. 우측 하단 **"⚙️ 좌석 보조 설정"** 버튼 클릭
+3. 모달에서 값 입력 (매수, 등급 필터, 선호 블럭/행/열 등)
+4. **"💾 저장 & 새로고침"** 클릭 → 저장됨
+5. 설정은 브라우저(Tampermonkey GM storage)에 영속 저장 → 나중에 예매 팝업 열리면 자동 적용
 
-> 참고: 예매 팝업은 브라우저 주소창/확장 아이콘이 없는 window 라서 Tampermonkey 🐵 메뉴에 접근 불가.
-> 그래서 페이지 내 ⚙️ 버튼으로 제공함. 일반 탭에서는 🐵 아이콘 메뉴에도 동일 항목 있음.
+**저장 후 동작**
+- **등급 리스트 화면** (예매 팝업 첫 단계): 저장된 `SEAT_GRADE_FILTER`/`EXCLUDE` 로 자동 필터링
+- **좌석맵**: 선호 블럭/행/열 자동 하이라이트(주황), Q 키 자동선택 우선순위 적용
+- **CAPTCHA**: 자동 포커스 + 한↔영 자판 변환
+
+> 예매 팝업 안에서도 같은 ⚙️ 버튼으로 설정 변경 가능하지만, 타이머 도는 중이라 급함. 미리 하는 걸 권장.
 
 **설정 항목**
 | 필드 | 설명 | 입력 예시 |

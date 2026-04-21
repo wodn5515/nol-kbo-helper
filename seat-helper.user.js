@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.2
+// @version      1.1.3
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
+// @match        https://ticket.interpark.com/Contents/Sports/*
 // @run-at       document-end
 // @all-frames   true
 // @grant        GM_getValue
@@ -195,18 +196,19 @@
       if (!document.body) { setTimeout(addSettingsButton, 100); return; }
       const btn = document.createElement('button');
       btn.id = '__nol_settings_btn__';
-      btn.textContent = '⚙️';
-      btn.title = '예매 보조 설정';
+      btn.textContent = '⚙️ 좌석 보조 설정';
+      btn.title = '좌석 등급 필터 · 선호 블럭 · 매수 등 미리 설정';
       btn.style.cssText = [
         'position:fixed', 'bottom:20px', 'right:20px', 'z-index:2147483645',
-        'width:44px', 'height:44px', 'border-radius:50%',
+        'padding:10px 16px', 'border-radius:24px',
         'background:#222', 'color:#fff', 'border:1px solid #555',
-        'font-size:22px', 'cursor:pointer', 'line-height:1',
+        'font:600 13px system-ui,-apple-system,sans-serif',
+        'cursor:pointer', 'line-height:1',
         'box-shadow:0 4px 14px rgba(0,0,0,.5)',
-        'user-select:none', 'opacity:0.55', 'transition:opacity .15s',
+        'user-select:none', 'opacity:0.72', 'transition:opacity .15s',
       ].join(';');
       btn.addEventListener('mouseenter', () => btn.style.opacity = '1');
-      btn.addEventListener('mouseleave', () => btn.style.opacity = '0.55');
+      btn.addEventListener('mouseleave', () => btn.style.opacity = '0.72');
       btn.addEventListener('click', openSettingsDialog);
       document.body.appendChild(btn);
     };
