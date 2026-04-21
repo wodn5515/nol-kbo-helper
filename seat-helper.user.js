@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.6
+// @version      1.1.7
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -196,22 +196,33 @@
   function findNextIn(doc) {
     const sels = [
       'a[onclick*="NextStep" i]', 'a[onclick*="fnNext" i]', 'a[onclick*="goNext" i]',
+      'a[onclick*="fnSelect" i]',   // 좌석선택완료
       'a[onclick*="fnCheck" i]', 'a[onclick*="fnSubmit" i]',
       'button[onclick*="NextStep" i]', 'button[onclick*="fnNext" i]',
       '.btn_next', '#btnNext', '.nextBtn', '[class*="btnNext"]', '[class*="BtnNext"]',
       'a.btn_next', 'a.next', 'a.nextStep', 'a.btnOk', 'a.btn_ok',
+      '#NextStepImage',                                           // 좌석선택완료 이미지 id
+      'img[alt*="좌석선택완료"]', 'img[alt*="다음" i]',
       'input[type="button"][value*="다음"]', 'input[type="submit"][value*="다음"]',
       'input[type="image"][alt*="다음"]', 'input[type="image"][src*="next" i]',
     ];
     for (const sel of sels) {
-      try { const b = doc.querySelector(sel); if (b && b.offsetParent !== null) return { el: b, via: `sel:${sel}` }; } catch (_) {}
+      try {
+        const b = doc.querySelector(sel);
+        if (!b || b.offsetParent === null) continue;
+        // img 가 매칭된 경우 클릭해야 할 건 부모 a
+        const target = b.closest('a, button, input[type="button"], input[type="submit"], input[type="image"]') || b;
+        return { el: target, via: `sel:${sel}` };
+      } catch (_) {}
     }
-    // 텍스트 기반 fallback — visible 한 clickable 요소 중 NEXT_LABELS 와 일치
+    // 텍스트 / img alt fallback — visible 한 clickable 중 라벨 일치
     const candidates = doc.querySelectorAll('a, button, input[type="button"], input[type="submit"]');
     for (const el of candidates) {
       if (el.offsetParent === null) continue;
       const text = ((el.textContent || el.value || '') + '').replace(/\s+/g, '').trim();
-      if (NEXT_LABELS.includes(text)) return { el, via: `text:${text}` };
+      const imgAlt = (el.querySelector('img')?.getAttribute('alt') || '').replace(/\s+/g, '').trim();
+      const label = NEXT_LABELS.find(l => l === text || l === imgAlt);
+      if (label) return { el, via: `label:${label}` };
     }
     return null;
   }
