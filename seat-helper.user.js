@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.2
+// @version      2.1.3
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -549,45 +549,77 @@
     // AUTO_FLOW — CAPTCHA 통과 후 SEAT_PROFILES 우선순위대로 등급 자동 클릭
     // (좌석맵 backtrack 으로 돌아온 경우 nol_tried_grades 에 기록된 등급 제외)
     if (S.AUTO_FLOW && !window.__auto_grade_clicked__ && !isAutoFlowExhausted()) {
+      log(`[AUTO/등급] AUTO_FLOW 대기 시작 (url=${location.pathname})`);
       whenCaptchaResolved(() => {
-        if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
+        if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) {
+          log(`[AUTO/등급] skip — grade_clicked=${!!window.__auto_grade_clicked__}, exhausted=${isAutoFlowExhausted()}`);
+          return;
+        }
         const autoPickGrade = () => {
           if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
           const triedGrades = (() => {
             try { return JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); }
             catch (_) { return []; }
           })();
-          const visible = Array.from(list.querySelectorAll('a[sgn]'))
-            .filter(a => a.style.display !== 'none' && a.offsetParent !== null)
-            .filter(a => !triedGrades.includes(a.getAttribute('sgn') || ''));
 
-          if (triedGrades.length) {
-            log(`[AUTO] 이전 시도 등급 제외: ${JSON.stringify(triedGrades)}`);
-          }
+          // 전체 a[sgn] 열거 — 숨김/rc=0/tried 이유 전부 로깅
+          const all = Array.from(list.querySelectorAll('a[sgn]'));
+          const enumerated = all.map(a => {
+            const sgn = a.getAttribute('sgn') || '';
+            const rc  = parseInt(a.getAttribute('rc') || '0', 10);
+            const hiddenByStyle = a.style.display === 'none' || a.offsetParent === null;
+            const tried = triedGrades.includes(sgn);
+            const reasons = [];
+            if (hiddenByStyle) reasons.push('hidden');
+            if (tried)         reasons.push('tried');
+            if (rc <= 0)       reasons.push('rc=0');
+            return { sgn, rc, a, skip: reasons.length > 0, reasons };
+          });
+          log(`[AUTO/등급] 리스트 전체 ${all.length}개 (tried=${JSON.stringify(triedGrades)})`);
+          enumerated.forEach((e, i) => {
+            const mark = e.skip ? '✗' : '✓';
+            const why  = e.reasons.length ? ` [${e.reasons.join(',')}]` : '';
+            log(`  ${mark} #${i+1} "${e.sgn}" rc=${e.rc}${why}`);
+          });
 
-          // 프로필 순위로 매칭 시도 (rc>0)
+          const candidates = enumerated.filter(e => !e.skip);
+
+          // 프로필 순위로 매칭 시도
           let target = null;
           let matchedProfile = null;
+          let matchedProfileIdx = -1;
           const profiles = S.SEAT_PROFILES || [];
-          for (const p of profiles) {
-            const hit = visible.find(a => {
-              const sgn = a.getAttribute('sgn') || '';
-              const rc  = parseInt(a.getAttribute('rc') || '0', 10);
-              if (rc <= 0) return false;
-              return !p.grade || sgn.includes(p.grade);
-            });
-            if (hit) { target = hit; matchedProfile = p; break; }
+          log(`[AUTO/등급] SEAT_PROFILES ${profiles.length}개 순차 매칭:`);
+          for (let i = 0; i < profiles.length; i++) {
+            const p = profiles[i];
+            const hit = candidates.find(c => !p.grade || c.sgn.includes(p.grade));
+            if (hit) {
+              log(`  ➜ #${i+1} grade="${p.grade || '(any)'}" → MATCH "${hit.sgn}" rc=${hit.rc}`);
+              target = hit.a;
+              matchedProfile = p;
+              matchedProfileIdx = i;
+              break;
+            } else {
+              const dropped = enumerated.filter(e => e.skip && (!p.grade || e.sgn.includes(p.grade)));
+              const msg = dropped.length
+                ? `dropped=[${dropped.map(d => `"${d.sgn}"(${d.reasons.join(',')})`).join(', ')}]`
+                : '해당 등급 없음';
+              log(`  ✗ #${i+1} grade="${p.grade || '(any)'}" — no candidate (${msg})`);
+            }
           }
           // SEAT_PROFILES 비어있을 때만 legacy fallback (rc>0 첫 등급)
-          // 프로필이 있으면 지정된 등급 외엔 절대 선택 안 함 — 오선택 방지
           if (!target && profiles.length === 0) {
-            target = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0) || visible[0];
+            const fb = candidates[0];
+            if (fb) {
+              target = fb.a;
+              log(`[AUTO/등급] profile 없음 → legacy fallback: "${fb.sgn}" rc=${fb.rc}`);
+            }
           }
           if (!target) {
             if (profiles.length) {
-              warn('[AUTO] SEAT_PROFILES 매칭 등급 없음 — AUTO_FLOW 중단 (빈 fallback profile 추가하면 아무 등급이나 잡힘)');
+              warn('[AUTO/등급] SEAT_PROFILES 매칭 등급 없음 — AUTO_FLOW 중단 (빈 fallback profile 추가하면 아무 등급이나 잡힘)');
             } else {
-              warn('[AUTO] 시도 가능한 등급 소진 — AUTO_FLOW 중단');
+              warn('[AUTO/등급] 시도 가능한 등급 소진 — AUTO_FLOW 중단');
             }
             markAutoFlowExhausted();
             return;
@@ -597,9 +629,9 @@
           const gradeSgn = target.getAttribute('sgn') || '';
           try { sessionStorage.setItem('nol_current_grade', gradeSgn); } catch (_) {}
           const tag = matchedProfile
-            ? ` [profile: grade="${matchedProfile.grade || '(any)'}"]`
+            ? ` [profile #${matchedProfileIdx+1} grade="${matchedProfile.grade || '(any)'}"]`
             : '';
-          log(`[AUTO] 등급 자동선택${tag}: ${gradeSgn} (rc=${target.getAttribute('rc')})`);
+          log(`[AUTO/등급] 자동선택${tag}: "${gradeSgn}" (rc=${target.getAttribute('rc')}) · onclick=${target.getAttribute('onclick')?.slice(0, 80)}`);
           target.click();
         };
         setTimeout(autoPickGrade, 400 + Math.floor(Math.random() * 200));
@@ -613,6 +645,7 @@
   // CAPTCHA 오버레이가 같이 떠 있으면 통과할 때까지 대기
   // =========================================================
   function autoClickSeatChoice() {
+    log(`[AUTO/분기] 진입 (url=${location.pathname}) seatchoice_done=${!!window.__auto_seatchoice_done__}, exhausted=${isAutoFlowExhausted()}`);
     if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
     whenCaptchaResolved(() => {
       if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
@@ -623,21 +656,27 @@
 
         // ★ 반드시 등급 auto-click 완료된 뒤에만 진행 (같은 페이지 공존 구조 대응)
         if (!window.__auto_grade_clicked__) {
+          if (attempts === 1 || attempts % 20 === 0) {
+            log(`[AUTO/분기] 등급 클릭 대기 (attempts=${attempts}) — __auto_grade_clicked__=false`);
+          }
           if (attempts < 100) setTimeout(tryClick, 150);
-          else warn('[AUTO] 등급 자동선택이 안 돼서 좌석선택 단계 진입 못함');
+          else warn('[AUTO/분기] 등급 자동선택이 안 돼서 좌석선택 단계 진입 못함');
           return;
         }
 
         // 등급 클릭 후에도 Interpark JS 가 DOM 업데이트 시간 필요
         const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
         if (!btn || btn.offsetParent === null) {
+          if (attempts === 1 || attempts % 20 === 0) {
+            log(`[AUTO/분기] 좌석선택 버튼 대기 (attempts=${attempts}) — btn=${!!btn}, visible=${btn?.offsetParent !== null}`);
+          }
           if (attempts < 100) setTimeout(tryClick, 150);
-          else warn('[AUTO] 좌석선택 버튼 visible 전환 안됨 — 수동 진행');
+          else warn('[AUTO/분기] 좌석선택 버튼 visible 전환 안됨 — 수동 진행');
           return;
         }
 
         window.__auto_seatchoice_done__ = true;
-        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
+        log(`[AUTO/분기] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회) · onclick=${btn.getAttribute('onclick')?.slice(0, 80)}`);
         btn.click();
       };
       // 초기 지연 제거 — 플래그 기반 대기로 충분
@@ -654,22 +693,34 @@
     // 현재 좌석맵의 등급 감지 (좌석 title: "[등급명] 블럭-좌석")
     // → SEAT_PROFILES 에서 매칭되는 프로필의 blocks/rows/columns 를 SEAT_PREFERENCE 로 override
     const profiles = S.SEAT_PROFILES || [];
+    const totalSeatsAtInit = document.querySelectorAll('img.stySeat').length;
+    const titledSeatsAtInit = document.querySelectorAll('img.stySeat[title]').length;
+    log(`[AUTO/좌석맵] initSeatMap 진입 (url=${location.pathname}) · img.stySeat=${totalSeatsAtInit}, title 있음=${titledSeatsAtInit}`);
+
     if (profiles.length) {
       const firstSeat = document.querySelector('img.stySeat[title]');
       const title = firstSeat?.getAttribute('title') || '';
       const gradeMatch = title.match(/^\[([^\]]+)\]/);
-      const currentGrade = gradeMatch ? gradeMatch[1] : '';
-      const matched = profiles.find(p => !p.grade || currentGrade.includes(p.grade));
+      const gradeFromTitle = gradeMatch ? gradeMatch[1] : '';
+      let gradeFromSession = '';
+      try { gradeFromSession = sessionStorage.getItem('nol_current_grade') || ''; } catch (_) {}
+      const currentGrade = gradeFromTitle || gradeFromSession;
+      log(`[AUTO/좌석맵] currentGrade: title="${gradeFromTitle}" session="${gradeFromSession}" → "${currentGrade}" (firstSeat.title="${title.slice(0, 60)}")`);
+
+      const matchedIdx = profiles.findIndex(p => !p.grade || currentGrade.includes(p.grade));
+      const matched = matchedIdx >= 0 ? profiles[matchedIdx] : null;
       if (matched) {
         S.SEAT_PREFERENCE = {
           blocks:  matched.blocks  || [],
           rows:    matched.rows    || [],
           columns: matched.columns || [],
         };
-        log(`활성 프로필: grade="${matched.grade || '(any)'}" (현재=${currentGrade})`, S.SEAT_PREFERENCE);
+        log(`[AUTO/좌석맵] 활성 프로필 #${matchedIdx+1}: grade="${matched.grade || '(any)'}" → SEAT_PREFERENCE=`, S.SEAT_PREFERENCE);
       } else {
-        log(`SEAT_PROFILES 매칭 없음 (현재="${currentGrade}") — fallback 으로 SEAT_PREFERENCE 사용`);
+        log(`[AUTO/좌석맵] SEAT_PROFILES 매칭 없음 (currentGrade="${currentGrade}") — fallback 으로 기존 SEAT_PREFERENCE 사용:`, S.SEAT_PREFERENCE);
       }
+    } else {
+      log(`[AUTO/좌석맵] SEAT_PROFILES 비어있음 — SEAT_PREFERENCE 그대로 사용:`, S.SEAT_PREFERENCE);
     }
 
     const allSeats = () => Array.from(document.querySelectorAll('img.stySeat'));
@@ -914,13 +965,32 @@
 
     // Q: 선호 조건 AND 매칭된 좌석 중에서만 연속 N매 가능한 자리 선택
     const autoPick = async () => {
-      const avail = allSeats().filter(isAvailable);
+      const all = allSeats();
+      const avail = all.filter(isAvailable);
+      log(`[AUTO/pick] 전체 좌석 ${all.length}, 가용 ${avail.length}, prefActive=${prefActive}, TICKET_COUNT=${S.TICKET_COUNT}`);
+      if (prefActive) {
+        log(`[AUTO/pick] SEAT_PREFERENCE: blocks=${JSON.stringify(S.SEAT_PREFERENCE.blocks)} rows=${JSON.stringify(S.SEAT_PREFERENCE.rows)} columns=${JSON.stringify(S.SEAT_PREFERENCE.columns)}`);
+      }
+
+      // 가용 좌석의 블럭 분포 집계 (선호 blocks 와 비교용)
+      if (avail.length > 0 && avail.length <= 200) {
+        const byBlock = {};
+        avail.forEach(s => {
+          const sid = seatSID(s);
+          const ov  = sid ? overlayOfSID(sid) : null;
+          const blk = ov ? (ov.getAttribute('rg') || '').split('_')[0] : '?';
+          byBlock[blk] = (byBlock[blk] || 0) + 1;
+        });
+        log(`[AUTO/pick] 가용 좌석 블럭 분포:`, byBlock);
+      }
+
       let candidates = prefActive ? avail.filter(matchesPreference) : avail;
 
       if (prefActive && candidates.length === 0) {
-        warn(`선호 조건 매칭 좌석 없음 — blocks=${JSON.stringify(S.SEAT_PREFERENCE.blocks)} rows=${JSON.stringify(S.SEAT_PREFERENCE.rows)} columns=${JSON.stringify(S.SEAT_PREFERENCE.columns)}`);
+        warn(`[AUTO/pick] 선호 조건 AND 매칭 좌석 0개 — blocks=${JSON.stringify(S.SEAT_PREFERENCE.blocks)} rows=${JSON.stringify(S.SEAT_PREFERENCE.rows)} columns=${JSON.stringify(S.SEAT_PREFERENCE.columns)}`);
         return false;
       }
+      log(`[AUTO/pick] 매칭 후보 ${candidates.length}개`);
 
       if (prefActive) {
         candidates = candidates
@@ -929,16 +999,18 @@
           .map(x => x.s);
       }
 
+      let tried = 0;
       for (const s of candidates) {
+        tried++;
         const group = findCompanions(s, S.TICKET_COUNT);
         if (group.length >= S.TICKET_COUNT) {
           await selectGroup(group);
           const tag = prefActive ? ` (AND match, score=${scoreSeat(s)})` : '';
-          log(`✅ ${group.length}매 선택${tag}: ${group.map(x => x.getAttribute('title') || x.getAttribute('seatinfo') || '').join(' | ')}`);
+          log(`[AUTO/pick] ✅ ${group.length}매 선택${tag} · 시도 ${tried}/${candidates.length}: ${group.map(x => x.getAttribute('title') || x.getAttribute('seatinfo') || '').join(' | ')}`);
           return true;
         }
       }
-      warn(prefActive ? '매칭 좌석 중 연속 N칸 가능한 자리 없음' : '연속 빈자리 없음');
+      warn(`[AUTO/pick] ${candidates.length}개 후보 모두 연속 ${S.TICKET_COUNT}칸 불가 (${prefActive ? '선호 매칭 중' : '전체 중'})`);
       return false;
     };
 
@@ -1001,58 +1073,92 @@
       // SEAT_PROFILES 매칭 실패 시 이전단계로 복귀 — 다음 profile 시도
       // reason: "빈자리 없음" / "선호 매칭 실패" 등 로그용
       const doBacktrack = async (reason) => {
+        log(`[AUTO/backtrack] 진입 — reason="${reason}" · url=${location.pathname}`);
         const profiles = S.SEAT_PROFILES || [];
         if (profiles.length < 2) {
-          warn(`[AUTO] ${reason} — 수동 진행 필요 (SEAT_PROFILES 가 1개 이하라 backtrack 불가)`);
+          warn(`[AUTO/backtrack] ${reason} — 수동 진행 필요 (SEAT_PROFILES 가 ${profiles.length}개라 backtrack 불가, 2개 이상 필요)`);
           return;
         }
         // 현재 등급 식별 — 등급 자동선택 시 저장한 sessionStorage 가 진실의 근원
         // (좌석 title 파싱은 좌석이 하나도 없을 때/포맷이 다를 때 실패하므로 fallback)
         let currentGrade = '';
+        let gradeSrc = '';
         try { currentGrade = sessionStorage.getItem('nol_current_grade') || ''; } catch (_) {}
+        if (currentGrade) gradeSrc = 'sessionStorage';
         if (!currentGrade) {
           const firstSeat = document.querySelector('img.stySeat[title]');
           const title = firstSeat?.getAttribute('title') || '';
           const m = title.match(/^\[([^\]]+)\]/);
-          if (m) currentGrade = m[1];
+          if (m) { currentGrade = m[1]; gradeSrc = 'title 파싱'; }
+          log(`[AUTO/backtrack] session 에 등급 없음 → title 파싱 시도: firstSeat="${title.slice(0, 60)}" → "${currentGrade}"`);
         }
 
         let triedGrades = [];
         try { triedGrades = JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); } catch (_) {}
+        log(`[AUTO/backtrack] currentGrade="${currentGrade}" (src=${gradeSrc || 'none'}), 기존 tried=${JSON.stringify(triedGrades)}`);
         if (currentGrade && !triedGrades.includes(currentGrade)) {
           triedGrades.push(currentGrade);
           try { sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades)); } catch (_) {}
+          log(`[AUTO/backtrack] tried 에 "${currentGrade}" 추가 → ${JSON.stringify(triedGrades)}`);
         } else if (!currentGrade) {
           // 등급 식별 완전 실패 — 같은 등급 무한 루프 방지를 위해 AUTO_FLOW 소진 처리
-          warn('[AUTO] 현재 등급 식별 실패 → AUTO_FLOW 중단 (무한 루프 방지)');
+          warn('[AUTO/backtrack] 현재 등급 식별 실패 (session/title 둘 다 비어있음) → AUTO_FLOW 중단 (무한 루프 방지)');
+          markAutoFlowExhausted();
+          return;
+        } else {
+          warn(`[AUTO/backtrack] "${currentGrade}" 는 이미 tried 에 있음 — 중복 진입 가능성, AUTO_FLOW 소진 처리`);
           markAutoFlowExhausted();
           return;
         }
 
-        log(`[AUTO] "${currentGrade}" ${reason} → 이전 단계 복귀 (tried=${triedGrades.length})`);
+        log(`[AUTO/backtrack] "${currentGrade}" ${reason} → 이전 단계 복귀 시도 (tried=${triedGrades.length}/${profiles.length})`);
         window.__auto_seat_done__ = true;
         await wait(400);
+
         // 좌석맵은 iframe 이라 이전단계 버튼은 부모 프레임에 있음 → 다중 프레임 검색
+        // 각 프레임 후보 enumerate + 최종 선택 로그
         const findBackBtn = () => {
           const frames = [];
-          try { frames.push(document); } catch (_) {}
-          try { if (window.parent && window.parent !== window) frames.push(window.parent.document); } catch (_) {}
-          try { if (window.top && window.top !== window && window.top !== window.parent) frames.push(window.top.document); } catch (_) {}
-          for (const doc of frames) {
-            try {
-              const btn = doc.querySelector('a[onclick*="fnCancel" i]')
-                       || doc.querySelector('img[alt*="이전단계"]')?.closest('a');
-              if (btn && btn.offsetParent !== null) return btn;
-            } catch (_) {}
+          try { frames.push({ name: 'self', doc: document }); } catch (_) {}
+          try { if (window.parent && window.parent !== window) frames.push({ name: 'parent', doc: window.parent.document }); } catch (e) { log(`[AUTO/backtrack] parent 접근 실패: ${e.message}`); }
+          try { if (window.top && window.top !== window && window.top !== window.parent) frames.push({ name: 'top', doc: window.top.document }); } catch (e) { log(`[AUTO/backtrack] top 접근 실패: ${e.message}`); }
+          log(`[AUTO/backtrack] 프레임 ${frames.length}개 검색 (${frames.map(f => f.name).join(', ')})`);
+
+          const selectors = [
+            'a[onclick*="fnCancel" i]',
+            'a[onclick*="history.back" i]',
+            'a[onclick*="goBack" i]',
+            'img[alt*="이전단계"]',
+            'img[alt*="이전 단계"]',
+            'button[onclick*="fnCancel" i]',
+          ];
+
+          for (const { name, doc } of frames) {
+            for (const sel of selectors) {
+              try {
+                const hits = Array.from(doc.querySelectorAll(sel));
+                if (!hits.length) continue;
+                log(`  · [${name}] selector "${sel}" → ${hits.length}개 매칭`);
+                for (const h of hits) {
+                  const btn = h.closest?.('a') || h;
+                  const visible = btn.offsetParent !== null;
+                  const onclick = btn.getAttribute?.('onclick') || '(no onclick)';
+                  log(`    - visible=${visible}, onclick="${String(onclick).slice(0, 80)}"`);
+                  if (visible) return { btn, frame: name, selector: sel };
+                }
+              } catch (e) {
+                log(`  · [${name}] selector "${sel}" 에러: ${e.message}`);
+              }
+            }
           }
           return null;
         };
-        const backBtn = findBackBtn();
-        if (backBtn) {
-          log('[AUTO] 이전단계 click');
-          backBtn.click();
+        const found = findBackBtn();
+        if (found) {
+          log(`[AUTO/backtrack] 이전단계 클릭 → frame=${found.frame}, selector="${found.selector}"`);
+          found.btn.click();
         } else {
-          warn('[AUTO] 이전단계 버튼 못 찾음 — 수동 진행');
+          warn('[AUTO/backtrack] 이전단계 버튼 못 찾음 — 수동 진행');
         }
       };
 
