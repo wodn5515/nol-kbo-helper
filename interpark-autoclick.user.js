@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 자동화
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.2
+// @version      2.0.0
 // @description  인터파크 KBO 구단 페이지 — 오픈 시각 자동 감지 후 예매 버튼 고속 클릭
 // @match        https://ticket.interpark.com/Contents/Sports/GoodsInfo*
 // @run-at       document-end
