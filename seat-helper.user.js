@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.17
+// @version      1.1.18
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -997,19 +997,23 @@
         _p = _p.parentElement;
       }
 
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
+      // Enter 제출 — Interpark 의 onkeydown="IsEnterGo()" 가 이미 처리하면 우리는 skip
+      // (두 핸들러가 같이 fire 되면 fnCheck 이중 호출 → SeatBuffer ReferenceError)
+      if (!input.getAttribute('onkeydown')) {
+        input.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
           e.preventDefault();
-          // CAPTCHA 전용 버튼만 직접 타겟 — 뒤쪽 DOM 의 좌석선택완료/다음 버튼과 혼동 방지
           const captchaBtn = document.querySelector('.capchaBtns a, .capchaLayer a[onclick*="fnCheck" i], a[onclick*="fnCheck" i]');
           if (captchaBtn && captchaBtn.offsetParent !== null) {
-            log('CAPTCHA 입력완료 클릭');
+            log('CAPTCHA 입력완료 클릭 (fallback)');
             captchaBtn.click();
           } else {
             warn('CAPTCHA 제출 버튼 못 찾음');
           }
-        }
-      });
+        });
+      } else {
+        log('CAPTCHA input 에 네이티브 onkeydown 존재 — 자체 Enter 핸들러 skip');
+      }
     }
 
     const banner = document.createElement('div');
