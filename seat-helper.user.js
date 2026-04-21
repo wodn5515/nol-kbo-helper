@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.5
+// @version      2.0.6
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -33,16 +33,17 @@
   // (아래 DEFAULT_SETTINGS 는 최초 설치 시 기본값. 저장소에 값 있으면 그게 우선)
   // ========================================================================
   const DEFAULT_SETTINGS = {
-    TICKET_COUNT:       2,         // 매수 (연속석 자동 선택 수)
-    SEAT_GRADE_FILTER:  [],        // 등급 포함 키워드 (OR, 부분일치)
-    SEAT_GRADE_EXCLUDE: [],        // 등급 제외 키워드
-    HIDE_SOLD_OUT:      false,     // 잔여석 0 등급 숨김
-    CAPTCHA_SCALE:      2,         // (현재 미사용) CAPTCHA 확대 배율
-    AUTO_FLOW:          false,     // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
-    SEAT_PREFERENCE: {             // (fallback) SEAT_PROFILES 비어있을 때 사용
+    TICKET_COUNT:            2,     // 매수 (연속석 자동 선택 수)
+    SEAT_GRADE_FILTER:       [],    // 등급 포함 키워드 (OR, 부분일치)
+    SEAT_GRADE_EXCLUDE:      [],    // 등급 제외 키워드
+    HIDE_SOLD_OUT:           false, // 잔여석 0 등급 숨김
+    CAPTCHA_SCALE:           2,     // (현재 미사용) CAPTCHA 확대 배율
+    AUTO_FLOW:               false, // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
+    AUTO_CLOSE_BOOK_NOTICE:  false, // 예매안내 모달 자동 닫기 (Interpark JSONP 초기화와 충돌 가능성 있어 기본 off)
+    SEAT_PREFERENCE: {              // (fallback) SEAT_PROFILES 비어있을 때 사용
       blocks:  [],  rows: [],  columns: [],
     },
-    SEAT_PROFILES:      [],        // [{grade, blocks, rows, columns}, ...] 순서대로 시도
+    SEAT_PROFILES:           [],    // [{grade, blocks, rows, columns}, ...] 순서대로 시도
   };
   const SETTINGS_KEY = 'nol_kbo_seat_helper_settings';
 
@@ -185,6 +186,7 @@
       ${inp('SEAT_GRADE_EXCLUDE (제외 키워드)', 'text', S.SEAT_GRADE_EXCLUDE.join(', '), '__s_fexc__', '하나라도 포함되면 숨김')}
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
       ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
+      ${chk('AUTO_CLOSE_BOOK_NOTICE (예매안내 모달 자동 닫기 · 켜면 jsonCallback 에러 가능성)', S.AUTO_CLOSE_BOOK_NOTICE, '__s_closebn__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
       <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PROFILES (우선순위 배열 · 매칭된 등급의 blocks/rows/columns 적용)</div>
       ${txt('SEAT_PROFILES (JSON 배열)',
@@ -245,9 +247,10 @@
         TICKET_COUNT:       Math.max(1, parseInt($('__s_ticket__').value, 10) || 1),
         SEAT_GRADE_FILTER:  parseList($('__s_finc__').value, false),
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
-        HIDE_SOLD_OUT:      $('__s_sold__').checked,
-        AUTO_FLOW:          $('__s_auto__').checked,
-        CAPTCHA_SCALE:      S.CAPTCHA_SCALE,
+        HIDE_SOLD_OUT:          $('__s_sold__').checked,
+        AUTO_FLOW:              $('__s_auto__').checked,
+        AUTO_CLOSE_BOOK_NOTICE: $('__s_closebn__').checked,
+        CAPTCHA_SCALE:          S.CAPTCHA_SCALE,
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
           rows:    parseList($('__s_rows__').value, true),
@@ -349,29 +352,31 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 자동 닫기 — 페이지당 1회만 (Interpark flow 와 race 방지)
+  // 공통: 예매안내 팝업 자동 닫기 — AUTO_CLOSE_BOOK_NOTICE 가 true 일 때만
+  // (Interpark JSONP 초기화와 race 가능성 있어 기본 off)
   // =========================================================
-  let bookNoticeHandled = false;
-  const dismissBookNotice = () => {
-    if (bookNoticeHandled) return;
-    const layer = document.getElementById('divBookNoticeLayer');
-    if (!layer) return;
-    if (layer.offsetParent === null) return;
-    const close = layer.querySelector('.closeBtn');
-    if (!close) return;
-    bookNoticeHandled = true;
-    close.click();
-    log('예매안내 팝업 자동 닫힘 (1회 처리)');
-  };
-  dismissBookNotice();
-  try {
-    // childList 추가만 감시 (style/class 변화마다 fire 되지 않음 → 훨씬 조용)
-    const bn = new MutationObserver(() => {
-      if (bookNoticeHandled) { bn.disconnect(); return; }
-      dismissBookNotice();
-    });
-    bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
-  } catch (_) {}
+  if (S.AUTO_CLOSE_BOOK_NOTICE) {
+    let bookNoticeHandled = false;
+    const dismissBookNotice = () => {
+      if (bookNoticeHandled) return;
+      const layer = document.getElementById('divBookNoticeLayer');
+      if (!layer) return;
+      if (layer.offsetParent === null) return;
+      const close = layer.querySelector('.closeBtn');
+      if (!close) return;
+      bookNoticeHandled = true;
+      close.click();
+      log('예매안내 팝업 자동 닫힘 (1회 처리)');
+    };
+    dismissBookNotice();
+    try {
+      const bn = new MutationObserver(() => {
+        if (bookNoticeHandled) { bn.disconnect(); return; }
+        dismissBookNotice();
+      });
+      bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    } catch (_) {}
+  }
 
   // =========================================================
   // 모드 1: 등급 리스트 필터 (div.list > a[sgn])
