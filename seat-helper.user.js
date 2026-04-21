@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.10
+// @version      2.1.11
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
+// @match        https://ticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
-// @match        https://ticket.interpark.com/Contents/Sports/*
+// @match        https://*.interpark.com/*Book*
+// @match        https://*.interpark.com/*Seat*
+// @match        https://*.interpark.com/*Sports*
 // @run-at       document-end
 // @all-frames   true
 // @grant        GM_getValue
@@ -87,6 +90,24 @@
 
   const log  = (...a) => console.log('%c[HELPER]', 'color:#0af;font-weight:bold', ...a);
   const warn = (...a) => console.warn('%c[HELPER]', 'color:#fa0;font-weight:bold', ...a);
+
+  // ====== init 진단 로그 ======
+  // 두산 케이스: 같은 URL 이어도 iframe 구조 달라서 우리 스크립트가 좌석맵 frame
+  // 에 injection 안 될 수 있음. 어느 frame/URL 에 실행되는지 찍어서 @match 조정.
+  (() => {
+    let frameLabel = 'self';
+    try {
+      if (window === window.top) frameLabel = 'TOP';
+      else if (window.parent === window.top) frameLabel = 'child-of-TOP';
+      else frameLabel = 'nested-iframe';
+    } catch (_) {}
+    const initialSeats = document.querySelectorAll('img.stySeat').length;
+    const initialFrames = (() => { try { return window.frames.length; } catch (_) { return '?'; } })();
+    console.log(
+      '%c[HELPER/init]', 'color:#0f0;font-weight:bold',
+      `frame=${frameLabel} url=${location.href} · readyState=${document.readyState} · img.stySeat=${initialSeats} · child frames=${initialFrames}`
+    );
+  })();
 
   // =========================================================
   // [INTERPARK bug shim] jsonCallback JSONP race 무력화
