@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.5
+// @version      1.1.6
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -190,21 +190,52 @@
   // =========================================================
   // 공통: "다음" Enter 단축키
   // =========================================================
-  function clickNext() {
+  // 다음/확인 버튼 후보 텍스트 (라벨 기반 fallback)
+  const NEXT_LABELS = ['다음', '다음단계', '좌석선택완료', '결제하기', '확인', '입력완료', '예매하기', '완료', '동의'];
+
+  function findNextIn(doc) {
     const sels = [
-      'a[onclick*="NextStep"]', 'a[onclick*="fnNext"]', 'a[onclick*="goNext"]',
-      'button[onclick*="NextStep"]', 'button[onclick*="fnNext"]',
-      '.btn_next', '#btnNext', '.nextBtn', '[class*="btnNext"]',
-      'input[value*="다음"]',
+      'a[onclick*="NextStep" i]', 'a[onclick*="fnNext" i]', 'a[onclick*="goNext" i]',
+      'a[onclick*="fnCheck" i]', 'a[onclick*="fnSubmit" i]',
+      'button[onclick*="NextStep" i]', 'button[onclick*="fnNext" i]',
+      '.btn_next', '#btnNext', '.nextBtn', '[class*="btnNext"]', '[class*="BtnNext"]',
+      'a.btn_next', 'a.next', 'a.nextStep', 'a.btnOk', 'a.btn_ok',
+      'input[type="button"][value*="다음"]', 'input[type="submit"][value*="다음"]',
+      'input[type="image"][alt*="다음"]', 'input[type="image"][src*="next" i]',
     ];
-    const tryIn = (doc) => {
-      for (const sel of sels) { try { const b = doc.querySelector(sel); if (b) { b.click(); return true; } } catch (_) {} }
-      return false;
-    };
-    try { if (tryIn(document)) return true; } catch (_) {}
-    try { if (window.parent && tryIn(window.parent.document)) return true; } catch (_) {}
-    try { if (window.top && tryIn(window.top.document)) return true; } catch (_) {}
-    warn('다음 버튼 못 찾음');
+    for (const sel of sels) {
+      try { const b = doc.querySelector(sel); if (b && b.offsetParent !== null) return { el: b, via: `sel:${sel}` }; } catch (_) {}
+    }
+    // 텍스트 기반 fallback — visible 한 clickable 요소 중 NEXT_LABELS 와 일치
+    const candidates = doc.querySelectorAll('a, button, input[type="button"], input[type="submit"]');
+    for (const el of candidates) {
+      if (el.offsetParent === null) continue;
+      const text = ((el.textContent || el.value || '') + '').replace(/\s+/g, '').trim();
+      if (NEXT_LABELS.includes(text)) return { el, via: `text:${text}` };
+    }
+    return null;
+  }
+
+  function clickNext() {
+    const frames = [];
+    try { frames.push(document); } catch (_) {}
+    try { if (window.parent && window.parent !== window) frames.push(window.parent.document); } catch (_) {}
+    try { if (window.top && window.top !== window && window.top !== window.parent) frames.push(window.top.document); } catch (_) {}
+
+    for (const doc of frames) {
+      try {
+        const hit = findNextIn(doc);
+        if (hit) {
+          log(`다음 버튼 클릭 [${hit.via}]`);
+          hit.el.click();
+          // href="javascript:..." 인 a 태그는 click() 이 안 먹을 수 있어 onclick 직접 실행 fallback
+          const onclickAttr = hit.el.getAttribute('onclick');
+          if (onclickAttr) { try { (0, eval)(onclickAttr); } catch (_) {} }
+          return true;
+        }
+      } catch (_) {}
+    }
+    warn('다음 버튼 못 찾음 — 페이지 구조 확인 필요');
     return false;
   }
   document.addEventListener('keydown', (e) => {
