@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.9
+// @version      1.1.10
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -936,14 +936,13 @@
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
           e.preventDefault();
-          const submitSels = [
-            'button[type="submit"]', 'input[type="submit"]',
-            'a[onclick*="submit" i]', 'a[onclick*="confirm" i]',
-            '.btn_ok', '.btn_confirm', '#btnOk', '#btnConfirm',
-            'a[onclick*="fnNext"]', '.btn_next',
-          ];
-          for (const s of submitSels) { const b = document.querySelector(s); if (b) { b.click(); return; } }
-          warn('제출 버튼 못 찾음');
+          // 범용 clickNext 로 통일 (fnCheck / 입력완료 라벨 / 다양한 프레임 모두 커버)
+          if (!clickNext()) {
+            // 최후 fallback — 인터파크 CAPTCHA 전용
+            const btn = document.querySelector('a[onclick*="fnCheck" i], .capchaBtns a, a[onclick*="fnSubmit" i]');
+            if (btn) { log('CAPTCHA submit fallback click'); btn.click(); }
+            else warn('CAPTCHA 제출 버튼 못 찾음');
+          }
         }
       });
     }
