@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.19
+// @version      1.1.20
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -474,23 +474,28 @@
       const tryClick = () => {
         if (window.__auto_seatchoice_done__) return;
         attempts++;
-        // 등급 리스트가 아직 보이면 (유저/AUTO 가 등급 선택 전) → 대기
-        const gradeList = document.querySelector('div.list a[sgn]');
-        if (gradeList && gradeList.offsetParent !== null) {
-          if (attempts < 50) setTimeout(tryClick, 200);
+
+        // ★ 반드시 등급 auto-click 완료된 뒤에만 진행 (같은 페이지 공존 구조 대응)
+        if (!window.__auto_grade_clicked__) {
+          if (attempts < 100) setTimeout(tryClick, 150);
+          else warn('[AUTO] 등급 자동선택이 안 돼서 좌석선택 단계 진입 못함');
           return;
         }
+
+        // 등급 클릭 후에도 Interpark JS 가 DOM 업데이트 시간 필요
         const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
-        if (btn && btn.offsetParent !== null) {
-          window.__auto_seatchoice_done__ = true;
-          log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
-          btn.click();
+        if (!btn || btn.offsetParent === null) {
+          if (attempts < 100) setTimeout(tryClick, 150);
+          else warn('[AUTO] 좌석선택 버튼 visible 전환 안됨 — 수동 진행');
           return;
         }
-        if (attempts < 50) setTimeout(tryClick, 200);
-        else warn('[AUTO] 좌석선택 버튼 못 찾음 — 수동 진행');
+
+        window.__auto_seatchoice_done__ = true;
+        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
+        btn.click();
       };
-      setTimeout(tryClick, 400 + Math.floor(Math.random() * 200));
+      // 초기 지연 제거 — 플래그 기반 대기로 충분
+      tryClick();
     });
   }
 
