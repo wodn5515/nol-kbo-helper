@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.15
+// @version      1.1.16
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -304,29 +304,28 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 자동 닫기
-  // (팝업 뜨는 순간 감지해서 closeBtn 클릭 — 짧게 뜨고 바로 사라짐)
+  // 공통: 예매안내 팝업 자동 닫기 — 페이지당 1회만 (Interpark flow 와 race 방지)
   // =========================================================
-  let lastNoticeDismiss = 0;
+  let bookNoticeHandled = false;
   const dismissBookNotice = () => {
-    if (Date.now() - lastNoticeDismiss < 300) return; // 연속 호출 디바운스
+    if (bookNoticeHandled) return;
     const layer = document.getElementById('divBookNoticeLayer');
     if (!layer) return;
-    if (layer.offsetParent === null) return; // 이미 숨겨진 상태
+    if (layer.offsetParent === null) return;
     const close = layer.querySelector('.closeBtn');
-    if (close) close.click();
-    // closeBtn 없거나 click 안 먹을 때 fallback
-    if (typeof window.fnBookNoticeShowHide === 'function') {
-      try { window.fnBookNoticeShowHide(''); } catch (_) {}
-    }
-    lastNoticeDismiss = Date.now();
-    log('예매안내 팝업 자동 닫힘');
+    if (!close) return;
+    bookNoticeHandled = true;
+    close.click();
+    log('예매안내 팝업 자동 닫힘 (1회 처리)');
   };
-  dismissBookNotice(); // 로드 시점에 이미 떠있는 경우
+  dismissBookNotice();
   try {
-    new MutationObserver(dismissBookNotice).observe(document.documentElement, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class']
+    // childList 추가만 감시 (style/class 변화마다 fire 되지 않음 → 훨씬 조용)
+    const bn = new MutationObserver(() => {
+      if (bookNoticeHandled) { bn.disconnect(); return; }
+      dismissBookNotice();
     });
+    bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 
   // =========================================================
@@ -351,8 +350,10 @@
   const tryInitSeatMap = () => {
     if (document.querySelector('img.stySeat')) initSeatMap();
   };
-  if (document.readyState === 'complete') tryInitSeatMap();
-  else window.addEventListener('load', tryInitSeatMap, { once: true });
+  // load 후 300ms 추가 지연 — fnInit 내부의 AJAX 나 지연 초기화까지 완료 대기
+  const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 300);
+  if (document.readyState === 'complete') scheduleSeatMapInit();
+  else window.addEventListener('load', scheduleSeatMapInit, { once: true });
 
   // =========================================================
   // 모드 3: CAPTCHA (동적 감지)
