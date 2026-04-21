@@ -98,13 +98,16 @@ https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.use
 ### interpark-autoclick
 날짜는 패널 UI 로 입력 (localStorage 저장). 고급 설정 필요 없음.
 
-### seat-helper — Tampermonkey 메뉴에서 GUI 로 설정
+### seat-helper — GUI 다이얼로그로 설정
 
-`poticket.interpark.com` 페이지에서:
+`poticket.interpark.com` 예매 팝업에 진입하면 **우측 하단에 플로팅 ⚙️ 버튼** 자동 표시됨:
 
-1. 🐵 (Tampermonkey 아이콘) 클릭 → **"⚙️ 설정 열기"** 선택
-2. 모달 창에서 값 입력
+1. **⚙️ 버튼 클릭** → 설정 모달 오픈
+2. 원하는 값 입력
 3. **"💾 저장 & 새로고침"** 클릭 → 자동으로 페이지 reload, 새 설정 적용
+
+> 참고: 예매 팝업은 브라우저 주소창/확장 아이콘이 없는 window 라서 Tampermonkey 🐵 메뉴에 접근 불가.
+> 그래서 페이지 내 ⚙️ 버튼으로 제공함. 일반 탭에서는 🐵 아이콘 메뉴에도 동일 항목 있음.
 
 **설정 항목**
 | 필드 | 설명 | 입력 예시 |
