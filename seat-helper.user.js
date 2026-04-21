@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.4
+// @version      1.1.5
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -519,16 +519,35 @@
       return ok;
     };
 
-    // 선호도 스코어링 (S.SEAT_PREFERENCE 기반)
+    // 선호도 — blocks AND rows AND columns 교집합 필터 (빈 배열 필드 = 해당 제약 없음)
     const prefActive = S.SEAT_PREFERENCE.blocks.length + S.SEAT_PREFERENCE.rows.length + S.SEAT_PREFERENCE.columns.length > 0;
+
+    const matchesPreference = (seat) => {
+      if (!prefActive) return true;
+      const sid = seatSID(seat);
+      const ov  = sid ? overlayOfSID(sid) : null;
+      if (!ov) return false;
+      const ri  = ov.getAttribute('ri');
+      const ci  = ov.getAttribute('ci');
+      const blk = (ov.getAttribute('rg') || '').split('_')[0];
+      const inList = (list, val) => {
+        if (!list || !list.length) return true;           // 빈 배열 = 제약 없음
+        const strVal = String(val);
+        return list.some(x => String(x) === strVal);
+      };
+      return inList(S.SEAT_PREFERENCE.blocks,  blk)
+          && inList(S.SEAT_PREFERENCE.rows,    ri)
+          && inList(S.SEAT_PREFERENCE.columns, ci);
+    };
+
+    // 매칭된 좌석 내부 정렬용 (배열 앞쪽 값일수록 높은 점수)
     const scoreSeat = (seat) => {
       const sid = seatSID(seat);
       const ov  = sid ? overlayOfSID(sid) : null;
       if (!ov) return 0;
-      const ri  = ov.getAttribute('ri');   // 문자열 그대로 비교 (DOM 속성은 항상 string)
+      const ri  = ov.getAttribute('ri');
       const ci  = ov.getAttribute('ci');
       const blk = (ov.getAttribute('rg') || '').split('_')[0];
-      // 설정값이 숫자로 들어와도 DOM 속성(문자열)과 맞게 양쪽 String 정규화
       const rank = (list, val, base) => {
         if (!list || !list.length) return 0;
         const strVal = String(val);
@@ -540,36 +559,44 @@
            + rank(S.SEAT_PREFERENCE.columns, ci,      1);
     };
 
-    // 선호 좌석 하이라이트 (주기적 갱신 — 매진/선택 상태 변화 반영)
+    // 선호 좌석 하이라이트 — AND 매칭되는 자리만 (주기적 갱신)
     const applyPreferredHighlight = () => {
       allSeats().forEach(s => s.removeAttribute('data-preferred'));
       if (!prefActive) return;
       allSeats().forEach(s => {
-        if (isAvailable(s) && scoreSeat(s) > 0) s.setAttribute('data-preferred', '1');
+        if (isAvailable(s) && matchesPreference(s)) s.setAttribute('data-preferred', '1');
       });
     };
     applyPreferredHighlight();
     setInterval(applyPreferredHighlight, 800);
 
-    // Q: 선호 좌석 우선, 연속 N매 가능한 첫 자리 선택
+    // Q: 선호 조건 AND 매칭된 좌석 중에서만 연속 N매 가능한 자리 선택
     const autoPick = () => {
-      let candidates = allSeats().filter(isAvailable);
+      const avail = allSeats().filter(isAvailable);
+      let candidates = prefActive ? avail.filter(matchesPreference) : avail;
+
+      if (prefActive && candidates.length === 0) {
+        warn(`선호 조건 매칭 좌석 없음 — blocks=${JSON.stringify(S.SEAT_PREFERENCE.blocks)} rows=${JSON.stringify(S.SEAT_PREFERENCE.rows)} columns=${JSON.stringify(S.SEAT_PREFERENCE.columns)}`);
+        return false;
+      }
+
       if (prefActive) {
         candidates = candidates
           .map(s => ({ s, sc: scoreSeat(s) }))
           .sort((a, b) => b.sc - a.sc)
           .map(x => x.s);
       }
+
       for (const s of candidates) {
         const group = findCompanions(s, S.TICKET_COUNT);
         if (group.length >= S.TICKET_COUNT) {
           selectGroup(group);
-          const tag = prefActive ? ` (score=${scoreSeat(s)})` : '';
+          const tag = prefActive ? ` (AND match, score=${scoreSeat(s)})` : '';
           log(`✅ ${group.length}매 선택${tag}: ${group.map(x => x.getAttribute('title') || x.getAttribute('seatinfo') || '').join(' | ')}`);
           return true;
         }
       }
-      warn('연속 빈자리 없음');
+      warn(prefActive ? '매칭 좌석 중 연속 N칸 가능한 자리 없음' : '연속 빈자리 없음');
       return false;
     };
 
