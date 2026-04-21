@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.21
+// @version      1.1.22
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -475,13 +475,23 @@
     setTimeout(() => banner.remove(), 3000);
 
     // AUTO_FLOW — CAPTCHA 통과 후 SEAT_PROFILES 우선순위대로 등급 자동 클릭
+    // (좌석맵 backtrack 으로 돌아온 경우 nol_tried_grades 에 기록된 등급 제외)
     if (S.AUTO_FLOW && !window.__auto_grade_clicked__) {
       whenCaptchaResolved(() => {
         if (window.__auto_grade_clicked__) return;
         const autoPickGrade = () => {
           if (window.__auto_grade_clicked__) return;
+          const triedGrades = (() => {
+            try { return JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); }
+            catch (_) { return []; }
+          })();
           const visible = Array.from(list.querySelectorAll('a[sgn]'))
-            .filter(a => a.style.display !== 'none' && a.offsetParent !== null);
+            .filter(a => a.style.display !== 'none' && a.offsetParent !== null)
+            .filter(a => !triedGrades.includes(a.getAttribute('sgn') || ''));
+
+          if (triedGrades.length) {
+            log(`[AUTO] 이전 시도 등급 제외: ${JSON.stringify(triedGrades)}`);
+          }
 
           // 프로필 순위로 매칭 시도 (rc>0)
           let target = null;
@@ -496,11 +506,15 @@
             });
             if (hit) { target = hit; matchedProfile = p; break; }
           }
-          // 프로필 매칭 없으면 기존 동작 (rc>0 첫 등급)
+          // 프로필 매칭 없으면 rc>0 첫 등급
           if (!target) {
             target = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0) || visible[0];
           }
-          if (!target) { warn('[AUTO] 자동선택 가능한 등급 없음'); return; }
+          if (!target) {
+            warn('[AUTO] 시도 가능한 등급 소진 — 수동 진행 필요');
+            sessionStorage.removeItem('nol_tried_grades');  // 초기화 (다음 재시도용)
+            return;
+          }
 
           window.__auto_grade_clicked__ = true;
           const tag = matchedProfile
@@ -919,7 +933,45 @@
 
         // autoPick 내부에서 좌석들을 50ms 간격으로 순차 클릭
         const picked = await autoPick();
-        if (!picked) { warn('[AUTO] 좌석 자동선택 실패 — 수동 진행 필요'); return; }
+        if (!picked) {
+          // Backtrack: SEAT_PROFILES 가 있으면 이전단계로 돌아가서 다음 프로필 시도
+          const profiles = S.SEAT_PROFILES || [];
+          const MAX_BACKTRACK = 6;
+          if (profiles.length >= 2) {
+            // 현재 등급 식별 (좌석 title "[등급명] ...")
+            const firstSeat = document.querySelector('img.stySeat[title]');
+            const title = firstSeat?.getAttribute('title') || '';
+            const m = title.match(/^\[([^\]]+)\]/);
+            const currentGrade = m ? m[1] : '';
+
+            let triedGrades = [];
+            try { triedGrades = JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); } catch (_) {}
+            if (currentGrade && !triedGrades.includes(currentGrade)) {
+              triedGrades.push(currentGrade);
+              sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades));
+            }
+
+            if (triedGrades.length >= MAX_BACKTRACK) {
+              warn(`[AUTO] 최대 ${MAX_BACKTRACK}회 backtrack 도달 — 수동 진행`);
+              sessionStorage.removeItem('nol_tried_grades');
+              return;
+            }
+
+            log(`[AUTO] "${currentGrade}" 선호 좌석 매칭 실패 → 이전 단계 복귀 (tried=${triedGrades.length})`);
+            window.__auto_seat_done__ = true;
+            await wait(400);
+            const backBtn = document.querySelector('a[onclick*="fnCancel" i]')
+                         || document.querySelector('img[alt*="이전단계"]')?.closest('a');
+            if (backBtn) {
+              backBtn.click();
+            } else {
+              warn('[AUTO] 이전단계 버튼 못 찾음 — 수동 진행');
+            }
+            return;
+          }
+          warn('[AUTO] 좌석 자동선택 실패 — 수동 진행 필요');
+          return;
+        }
         window.__auto_seat_done__ = true;
 
         // SelectSeatKBO 는 AJAX 라 서버 반영 대기 — selected count 가 TICKET_COUNT 될 때까지 폴링
@@ -934,6 +986,9 @@
           warn(`[AUTO] 선택 확인 실패 (${finalSelected}/${S.TICKET_COUNT}) — 수동 진행`);
           return;
         }
+
+        // 성공 — tried grades 초기화 (다음 booking 을 위해)
+        sessionStorage.removeItem('nol_tried_grades');
 
         // 좌석선택완료 클릭 직전 50ms 딜레이
         await wait(STEP_DELAY_MS);
