@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.6
+// @version      2.0.7
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -39,7 +39,7 @@
     HIDE_SOLD_OUT:           false, // 잔여석 0 등급 숨김
     CAPTCHA_SCALE:           2,     // (현재 미사용) CAPTCHA 확대 배율
     AUTO_FLOW:               false, // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
-    AUTO_CLOSE_BOOK_NOTICE:  false, // 예매안내 모달 자동 닫기 (Interpark JSONP 초기화와 충돌 가능성 있어 기본 off)
+    HIDE_BOOK_NOTICE:        true,  // 예매안내 모달 CSS 로 숨김 (클릭 안 함, DOM 유지 → Interpark state 무간섭)
     SEAT_PREFERENCE: {              // (fallback) SEAT_PROFILES 비어있을 때 사용
       blocks:  [],  rows: [],  columns: [],
     },
@@ -186,7 +186,7 @@
       ${inp('SEAT_GRADE_EXCLUDE (제외 키워드)', 'text', S.SEAT_GRADE_EXCLUDE.join(', '), '__s_fexc__', '하나라도 포함되면 숨김')}
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
       ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
-      ${chk('AUTO_CLOSE_BOOK_NOTICE (예매안내 모달 자동 닫기 · 켜면 jsonCallback 에러 가능성)', S.AUTO_CLOSE_BOOK_NOTICE, '__s_closebn__')}
+      ${chk('HIDE_BOOK_NOTICE (예매안내 모달 CSS 로 숨김 · 클릭 안함 안전)', S.HIDE_BOOK_NOTICE, '__s_hidebn__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
       <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PROFILES (우선순위 배열 · 매칭된 등급의 blocks/rows/columns 적용)</div>
       ${txt('SEAT_PROFILES (JSON 배열)',
@@ -249,7 +249,7 @@
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
         HIDE_SOLD_OUT:          $('__s_sold__').checked,
         AUTO_FLOW:              $('__s_auto__').checked,
-        AUTO_CLOSE_BOOK_NOTICE: $('__s_closebn__').checked,
+        HIDE_BOOK_NOTICE:       $('__s_hidebn__').checked,
         CAPTCHA_SCALE:          S.CAPTCHA_SCALE,
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
@@ -352,30 +352,18 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 자동 닫기 — AUTO_CLOSE_BOOK_NOTICE 가 true 일 때만
-  // (Interpark JSONP 초기화와 race 가능성 있어 기본 off)
+  // 공통: 예매안내 팝업 CSS 숨김 — HIDE_BOOK_NOTICE 가 true 일 때
+  // 클릭 이벤트 발생 안 시키고 시각적으로만 숨김. DOM 은 그대로 → Interpark
+  // 내부 state (JSONP 초기화 등) 전혀 안 건드림.
   // =========================================================
-  if (S.AUTO_CLOSE_BOOK_NOTICE) {
-    let bookNoticeHandled = false;
-    const dismissBookNotice = () => {
-      if (bookNoticeHandled) return;
-      const layer = document.getElementById('divBookNoticeLayer');
-      if (!layer) return;
-      if (layer.offsetParent === null) return;
-      const close = layer.querySelector('.closeBtn');
-      if (!close) return;
-      bookNoticeHandled = true;
-      close.click();
-      log('예매안내 팝업 자동 닫힘 (1회 처리)');
-    };
-    dismissBookNotice();
-    try {
-      const bn = new MutationObserver(() => {
-        if (bookNoticeHandled) { bn.disconnect(); return; }
-        dismissBookNotice();
-      });
-      bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
-    } catch (_) {}
+  if (S.HIDE_BOOK_NOTICE) {
+    const hideStyle = document.createElement('style');
+    hideStyle.id = '__nol_hide_booknotice__';
+    hideStyle.textContent = `
+      #divBookNoticeLayer,
+      .bookNoticeLayer { display: none !important; }
+    `;
+    (document.head || document.documentElement).appendChild(hideStyle);
   }
 
   // =========================================================
@@ -1114,10 +1102,14 @@
         input.value = converted;
         input.setSelectionRange(converted.length, converted.length);
       };
-      input.addEventListener('input', convertIfNeeded);
+      // compositionend 에서만 변환 — IME 조합 완료 후 한 번만 치환
+      // (Windows 에서 compositionupdate/input 중 value 덮어쓰면 IME 가 혼란 → 글자 중복/누락)
       input.addEventListener('compositionend', convertIfNeeded);
-      // IME 가 compositionupdate 만 발화하고 input 은 안 터뜨리는 케이스 대비
-      input.addEventListener('compositionupdate', () => setTimeout(convertIfNeeded, 0));
+      // composition 없이 direct input 된 경우 (붙여넣기 등) 도 대비
+      input.addEventListener('input', (e) => {
+        if (e.isComposing) return;   // 조합 중엔 건드리지 않음
+        convertIfNeeded();
+      });
 
       // 페이지가 input 을 display:none 으로 숨겨둬서 focus 불가인 경우 → 강제 visible
       // ★ 중요: CAPTCHA 오버레이가 active 일 때만 동작. 해제 후엔 절대 DOM 건드리지 않음
