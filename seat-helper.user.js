@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.14
+// @version      2.1.15
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://ticket.interpark.com/*
@@ -40,7 +40,6 @@
     SEAT_GRADE_FILTER:  [],        // 등급 포함 키워드 (OR, 부분일치)
     SEAT_GRADE_EXCLUDE: [],        // 등급 제외 키워드
     HIDE_SOLD_OUT:      false,     // 잔여석 0 등급 숨김
-    CAPTCHA_SCALE:      2,         // (현재 미사용) CAPTCHA 확대 배율
     AUTO_FLOW:          false,     // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
     SEAT_PREFERENCE: {             // (fallback) SEAT_PROFILES 비어있을 때 사용
       blocks:  [],  rows: [],  columns: [],
@@ -509,7 +508,6 @@
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
         HIDE_SOLD_OUT:      $('__s_sold__').checked,
         AUTO_FLOW:          $('__s_auto__').checked,
-        CAPTCHA_SCALE:      S.CAPTCHA_SCALE,
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
           rows:    parseList($('__s_rows__').value, true),
@@ -804,27 +802,17 @@
     obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
     const tmo = setTimeout(() => finalize('timeout'), SEATMAP_MAX_WAIT_MS);
 
-    // 진행 로그 + 자식 frame 좌석 감지 (wrapper 늦게 판정되는 경우)
-    // 500ms 간격으로 상태 확인. 대기 도중 자식 frame 에 좌석이 나타나면
-    // 이 frame 은 wrapper 로 판정하고 조기 종료.
-    const progressTicker = setInterval(() => {
-      if (seatMapSettled) { clearInterval(progressTicker); return; }
-      // 자식 frame 에 좌석 생겼으면 wrapper 확정 → 대기 중단
+    // 대기 중 자식 frame 에 좌석 나타나면 wrapper 로 판정 → 조기 종료
+    const wrapperPoll = setInterval(() => {
+      if (seatMapSettled) { clearInterval(wrapperPoll); return; }
       if (childFrameHasSeats()) {
         seatMapSettled = true;
         try { obs.disconnect(); } catch (_) {}
         clearTimeout(tmo);
-        clearInterval(progressTicker);
-        log(`[AUTO/좌석맵] 대기 중 자식 frame 좌석 감지 — wrapper 판정, skip (${Date.now()-startedAt}ms)`);
-        return;
+        clearInterval(wrapperPoll);
+        log(`[AUTO/좌석맵] 대기 중 자식 frame 좌석 감지 — wrapper, skip (${Date.now()-startedAt}ms)`);
       }
-      const elapsed = Date.now() - startedAt;
-      const seats   = document.querySelectorAll('img.stySeat').length;
-      const isc     = document.getElementById('ImgSeatCount');
-      const iscVal  = isc ? isc.value : '(요소 없음)';
-      const bodyLen = document.body?.innerHTML?.length || 0;
-      log(`[AUTO/좌석맵] 대기 진행 ${elapsed}ms: img.stySeat=${seats}, ImgSeatCount="${iscVal}", body HTML=${bodyLen}자`);
-    }, 500);
+    }, 300);
   };
   // load 후 100ms 지연
   const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 100);
@@ -926,7 +914,7 @@
       log(`[AUTO/등급] AUTO_FLOW 대기 시작 (url=${location.pathname})`);
       whenCaptchaResolved(() => {
         if (window.__auto_grade_clicked__ || isAutoFlowBlocked()) {
-          log(`[AUTO/등급] skip — grade_clicked=${!!window.__auto_grade_clicked__}, exhausted=${isAutoFlowExhausted()}`);
+          log(`[AUTO/등급] skip — grade_clicked=${!!window.__auto_grade_clicked__}, blocked=${isAutoFlowBlocked()}`);
           return;
         }
         const autoPickGrade = () => {
@@ -1019,7 +1007,7 @@
   // CAPTCHA 오버레이가 같이 떠 있으면 통과할 때까지 대기
   // =========================================================
   function autoClickSeatChoice() {
-    log(`[AUTO/분기] 진입 (url=${location.pathname}) seatchoice_done=${!!window.__auto_seatchoice_done__}, exhausted=${isAutoFlowExhausted()}`);
+    log(`[AUTO/분기] 진입 (url=${location.pathname}) seatchoice_done=${!!window.__auto_seatchoice_done__}, blocked=${isAutoFlowBlocked()}`);
     if (window.__auto_seatchoice_done__ || isAutoFlowBlocked()) return;
     whenCaptchaResolved(() => {
       if (window.__auto_seatchoice_done__ || isAutoFlowBlocked()) return;
@@ -1444,10 +1432,6 @@
     // AUTO_FLOW — CAPTCHA 통과 후 좌석 로드 → autoPick → 좌석선택완료
     // 각 단계 사이 50ms 딜레이 (bot 탐지 완화)
     if (S.AUTO_FLOW && !window.__auto_seat_done__ && !isAutoFlowBlocked()) {
-      // SEAT_PROFILES 매칭 실패 시 이전단계로 복귀 — 다음 profile 시도
-      // reason: "빈자리 없음" / "선호 매칭 실패" 등 로그용
-      const doBacktrack = (reason) => triggerBacktrack(reason);
-
       whenCaptchaResolved(async () => {
         if (window.__auto_seat_done__ || isAutoFlowBlocked()) return;
         // tryInitSeatMap 이 이미 img.stySeat 존재 확인 후 initSeatMap 호출 →
@@ -1455,7 +1439,7 @@
         const availableCount = allSeats().filter(isAvailable).length;
         if (availableCount === 0) {
           warn('[AUTO] 빈자리 없음 — 등급 rc 와 실제 좌석 불일치');
-          await doBacktrack('빈자리 없음');
+          await triggerBacktrack('빈자리 없음');
           return;
         }
         log(`[AUTO] 좌석 ${allSeats().length}개 · 가용 ${availableCount} → autoPick`);
@@ -1463,7 +1447,7 @@
         // autoPick 내부에서 좌석들을 50ms 간격으로 순차 클릭
         const picked = await autoPick();
         if (!picked) {
-          await doBacktrack('선호 좌석 매칭 실패');
+          await triggerBacktrack('선호 좌석 매칭 실패');
           return;
         }
         window.__auto_seat_done__ = true;
