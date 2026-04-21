@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.11
+// @version      1.1.12
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -243,9 +243,11 @@
 
   function findNextIn(doc) {
     const sels = [
+      // CAPTCHA 최우선 — 오버레이로 떠있으면 뒤쪽 fnSelect/fnNext 보다 먼저 매칭돼야 함
+      '.capchaBtns a', 'a[onclick*="fnCheck" i]', 'a[onclick*="fnSubmit" i]',
+      // 일반 "다음" 계열
       'a[onclick*="NextStep" i]', 'a[onclick*="fnNext" i]', 'a[onclick*="goNext" i]',
       'a[onclick*="fnSelect" i]',   // 좌석선택완료
-      'a[onclick*="fnCheck" i]', 'a[onclick*="fnSubmit" i]',
       'button[onclick*="NextStep" i]', 'button[onclick*="fnNext" i]',
       '.btn_next', '#btnNext', '.nextBtn', '[class*="btnNext"]', '[class*="BtnNext"]',
       'a.btn_next', 'a.next', 'a.nextStep', 'a.btnOk', 'a.btn_ok',
@@ -655,11 +657,18 @@
     setInterval(renderHud, 400);
     renderHud();
 
-    const selectGroup = (group) => {
+    // 좌석 여러 개를 50ms 간격으로 순차 클릭 (서버 bot 탐지 완화)
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    const STEP_DELAY_MS = 50;
+    const selectGroup = async (group) => {
       let ok = 0;
-      for (const s of group) {
+      for (let i = 0; i < group.length; i++) {
+        const s = group[i];
         if (isSelected(s)) continue;
-        if (clickSeat(s)) ok++;
+        if (clickSeat(s)) {
+          ok++;
+          if (i < group.length - 1) await wait(STEP_DELAY_MS);
+        }
       }
       return ok;
     };
@@ -716,7 +725,7 @@
     setInterval(applyPreferredHighlight, 800);
 
     // Q: 선호 조건 AND 매칭된 좌석 중에서만 연속 N매 가능한 자리 선택
-    const autoPick = () => {
+    const autoPick = async () => {
       const avail = allSeats().filter(isAvailable);
       let candidates = prefActive ? avail.filter(matchesPreference) : avail;
 
@@ -735,7 +744,7 @@
       for (const s of candidates) {
         const group = findCompanions(s, S.TICKET_COUNT);
         if (group.length >= S.TICKET_COUNT) {
-          selectGroup(group);
+          await selectGroup(group);
           const tag = prefActive ? ` (AND match, score=${scoreSeat(s)})` : '';
           log(`✅ ${group.length}매 선택${tag}: ${group.map(x => x.getAttribute('title') || x.getAttribute('seatinfo') || '').join(' | ')}`);
           return true;
@@ -752,7 +761,7 @@
       if (!seat) return;
       if (!seat.getAttribute('onclick')) return;
       const my = ++clickToken;
-      setTimeout(() => {
+      setTimeout(async () => {
         if (my !== clickToken) return;
         if (S.TICKET_COUNT <= 1) return;
         const selectedNow = allSeats().filter(isSelected);
@@ -763,7 +772,7 @@
           warn(`같은 행에 ${S.TICKET_COUNT}칸 연속 없음 (단일 유지)`);
           return;
         }
-        selectGroup(group);
+        await selectGroup(group);
         log(`👥 연속석 자동: ${group.length}매`);
       }, 150);
     }, true);
@@ -799,39 +808,42 @@
     log(`좌석 보조 활성화 · 매수=${S.TICKET_COUNT}`);
 
     // AUTO_FLOW — CAPTCHA 통과 후 좌석 로드 → autoPick → 좌석선택완료
+    // 각 단계 사이 50ms 딜레이 (bot 탐지 완화)
     if (S.AUTO_FLOW && !window.__auto_seat_done__) {
-      whenCaptchaResolved(() => {
+      whenCaptchaResolved(async () => {
         if (window.__auto_seat_done__) return;
-        const waitForSeats = (attempt = 0) => {
-          if (window.__auto_seat_done__) return;
-          const availableCount = allSeats().filter(isAvailable).length;
-          if (availableCount < 3 && attempt < 30) {
-            setTimeout(() => waitForSeats(attempt + 1), 150);
-            return;
-          }
-          if (availableCount === 0) { warn('[AUTO] 빈자리 없음'); return; }
+        // 좌석 렌더 대기
+        let attempt = 0;
+        while (attempt < 30 && allSeats().filter(isAvailable).length < 3) {
+          await wait(150);
+          attempt++;
+        }
+        const availableCount = allSeats().filter(isAvailable).length;
+        if (availableCount === 0) { warn('[AUTO] 빈자리 없음'); return; }
+        log(`[AUTO] 좌석 로드 감지 (avail=${availableCount}) → autoPick`);
 
-          log(`[AUTO] 좌석 로드 감지 (avail=${availableCount}) → autoPick`);
-          const picked = autoPick();
-          if (!picked) { warn('[AUTO] 좌석 자동선택 실패 — 수동 진행 필요'); return; }
+        // autoPick 내부에서 좌석들을 50ms 간격으로 순차 클릭
+        const picked = await autoPick();
+        if (!picked) { warn('[AUTO] 좌석 자동선택 실패 — 수동 진행 필요'); return; }
+        window.__auto_seat_done__ = true;
 
-          window.__auto_seat_done__ = true;
-          const waitForSelection = (left = 20) => {
-            const selectedCount = allSeats().filter(isSelected).length;
-            if (selectedCount >= S.TICKET_COUNT) {
-              log(`[AUTO] ${selectedCount}매 선택 확인 → 좌석선택완료 클릭`);
-              setTimeout(() => clickNext(), 300 + Math.floor(Math.random() * 200));
-              return;
-            }
-            if (left <= 0) {
-              warn(`[AUTO] 선택 확인 실패 (${selectedCount}/${S.TICKET_COUNT}) — 수동 진행`);
-              return;
-            }
-            setTimeout(() => waitForSelection(left - 1), 100);
-          };
-          setTimeout(waitForSelection, 500);
-        };
-        setTimeout(waitForSeats, 400);
+        // SelectSeatKBO 는 AJAX 라 서버 반영 대기 — selected count 가 TICKET_COUNT 될 때까지 폴링
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+          const sel = allSeats().filter(isSelected).length;
+          if (sel >= S.TICKET_COUNT) break;
+          await wait(50);
+        }
+        const finalSelected = allSeats().filter(isSelected).length;
+        if (finalSelected < S.TICKET_COUNT) {
+          warn(`[AUTO] 선택 확인 실패 (${finalSelected}/${S.TICKET_COUNT}) — 수동 진행`);
+          return;
+        }
+
+        // 좌석선택완료 클릭 직전 50ms 딜레이
+        await wait(STEP_DELAY_MS);
+        log(`[AUTO] ${finalSelected}매 선택 확인 → 좌석선택완료 클릭`);
+        clickNext();
       });
     }
   }
@@ -971,12 +983,14 @@
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
           e.preventDefault();
-          // 범용 clickNext 로 통일 (fnCheck / 입력완료 라벨 / 다양한 프레임 모두 커버)
-          if (!clickNext()) {
-            // 최후 fallback — 인터파크 CAPTCHA 전용
-            const btn = document.querySelector('a[onclick*="fnCheck" i], .capchaBtns a, a[onclick*="fnSubmit" i]');
-            if (btn) { log('CAPTCHA submit fallback click'); btn.click(); }
-            else warn('CAPTCHA 제출 버튼 못 찾음');
+          // CAPTCHA 전용 버튼만 직접 타겟 — 뒤쪽 DOM 의 좌석선택완료/다음 버튼과 혼동 방지
+          const captchaBtn = document.querySelector('.capchaBtns a, .capchaLayer a[onclick*="fnCheck" i], a[onclick*="fnCheck" i]');
+          if (captchaBtn && captchaBtn.offsetParent !== null) {
+            log('CAPTCHA 입력완료 클릭');
+            captchaBtn.click();
+            try { (0, eval)(captchaBtn.getAttribute('onclick') || ''); } catch (_) {}
+          } else {
+            warn('CAPTCHA 제출 버튼 못 찾음');
           }
         }
       });
