@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.4
+// @version      2.1.5
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -129,6 +129,7 @@
       sessionStorage.removeItem('nol_tried_grades');
       sessionStorage.removeItem('nol_auto_flow_exhausted');
       sessionStorage.removeItem('nol_current_grade');
+      sessionStorage.removeItem('nol_captcha_passed');
     } catch (_) {}
   };
 
@@ -227,6 +228,16 @@
     warn('[AUTO/backtrack] 이전단계 버튼 못 찾음 — 수동 진행');
   }
 
+  // CAPTCHA 통과 플래그 — 예매 팝업 session 단위
+  // (CAPTCHA 는 첫 페이지에서만 등장, 이후 페이지는 이미 통과된 상태이므로
+  //  looking phase 4s 대기 없이 즉시 진행해야 함)
+  const captchaAlreadyPassed = () => {
+    try { return sessionStorage.getItem('nol_captcha_passed') === '1'; } catch (_) { return false; }
+  };
+  const markCaptchaPassed = () => {
+    try { sessionStorage.setItem('nol_captcha_passed', '1'); } catch (_) {}
+  };
+
   // whenCaptchaResolved — 2-phase gate
   // phase A (looking): 호출 시점에 CAPTCHA 가 아직 active 가 아닐 수 있음
   //                    (CAPTCHA.js 가 늦게 init 되거나 JSONP 실패로 layer 뒤늦게 visible).
@@ -235,7 +246,16 @@
   // phase B (waiting): 사용자가 CAPTCHA 풀 때까지 대기.
   //                    단, layer visibility 가 transient 하게 깜빡일 수 있으니
   //                    연속으로 STABLE_MS 동안 inactive 여야 cb().
+  // ★ 한 번 통과된 후엔 플래그 캐싱 — 좌석맵/분기 등 이후 페이지는 즉시 진행
+  //   (키움처럼 backtrack 빠르게 되려면 필수)
   const whenCaptchaResolved = (cb, timeoutMs = 10 * 60 * 1000) => {
+    if (captchaAlreadyPassed()) { cb(); return; }
+    if (captchaActive()) {
+      // 처음 등장한 CAPTCHA — 사용자 입력 대기
+    } else {
+      // 첫 진입이고 CAPTCHA 도 아직 안 뜸 → 등장 감시 (Doosan 타이밍 대응)
+    }
+
     const APPEAR_TIMEOUT = 4000;  // CAPTCHA 등장 기다리는 최대 시간
     const STABLE_MS      = 500;   // inactive 가 이 시간만큼 연속되어야 resolved 인정
     let phase = captchaActive() ? 'waiting' : 'looking';
@@ -252,6 +272,9 @@
       try { obs.disconnect(); } catch (_) {}
       clearInterval(intv);
       clearTimeout(tmo);
+      // 정상 통과(사용자 입력) 거나 "미등장" 둘 다 CAPTCHA 가 이 팝업에서 끝난 것으로 간주.
+      // timeout 은 10분짜리라 정상 상황에선 안 옴 — 캐싱하지 않음.
+      if (reason === '통과 감지' || reason === 'CAPTCHA 미등장') markCaptchaPassed();
       log('[AUTO] CAPTCHA 게이트 해제 — ' + reason);
       cb();
     };
