@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.14
+// @version      2.1.0
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -33,17 +33,16 @@
   // (아래 DEFAULT_SETTINGS 는 최초 설치 시 기본값. 저장소에 값 있으면 그게 우선)
   // ========================================================================
   const DEFAULT_SETTINGS = {
-    TICKET_COUNT:            2,     // 매수 (연속석 자동 선택 수)
-    SEAT_GRADE_FILTER:       [],    // 등급 포함 키워드 (OR, 부분일치)
-    SEAT_GRADE_EXCLUDE:      [],    // 등급 제외 키워드
-    HIDE_SOLD_OUT:           false, // 잔여석 0 등급 숨김
-    CAPTCHA_SCALE:           2,     // (현재 미사용) CAPTCHA 확대 배율
-    AUTO_FLOW:               false, // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
-    AUTO_CLOSE_BOOK_NOTICE:  true,  // 예매안내 모달 자동 닫기 (클릭) — CAPTCHA.js 로드 완료 대기 후 실행
-    SEAT_PREFERENCE: {              // (fallback) SEAT_PROFILES 비어있을 때 사용
+    TICKET_COUNT:       2,         // 매수 (연속석 자동 선택 수)
+    SEAT_GRADE_FILTER:  [],        // 등급 포함 키워드 (OR, 부분일치)
+    SEAT_GRADE_EXCLUDE: [],        // 등급 제외 키워드
+    HIDE_SOLD_OUT:      false,     // 잔여석 0 등급 숨김
+    CAPTCHA_SCALE:      2,         // (현재 미사용) CAPTCHA 확대 배율
+    AUTO_FLOW:          false,     // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
+    SEAT_PREFERENCE: {             // (fallback) SEAT_PROFILES 비어있을 때 사용
       blocks:  [],  rows: [],  columns: [],
     },
-    SEAT_PROFILES:           [],    // [{grade, blocks, rows, columns}, ...] 순서대로 시도
+    SEAT_PROFILES:      [],        // [{grade, blocks, rows, columns}, ...] 순서대로 시도
   };
   const SETTINGS_KEY = 'nol_kbo_seat_helper_settings';
 
@@ -115,50 +114,10 @@
     try {
       sessionStorage.removeItem('nol_tried_grades');
       sessionStorage.removeItem('nol_auto_flow_exhausted');
-      sessionStorage.removeItem('nol_auto_grade_clicked');
     } catch (_) {}
   };
 
-  // 등급 클릭 완료 여부 — sessionStorage 로 프레임/페이지간 공유
-  // (window 플래그만 쓰면 iframe 이나 페이지 navigation 시 동기 안됨)
-  const isGradeClicked = () => {
-    if (window.__auto_grade_clicked__) return true;
-    try { return sessionStorage.getItem('nol_auto_grade_clicked') === '1'; } catch (_) { return false; }
-  };
-  const markGradeClicked = () => {
-    window.__auto_grade_clicked__ = true;
-    try { sessionStorage.setItem('nol_auto_grade_clicked', '1'); } catch (_) {}
-  };
-
-  // =========================================================
-  // 공통 유틸 — 순서 보장용
-  // =========================================================
-  const wait = (ms) => new Promise(r => setTimeout(r, ms));
-  const waitUntil = (pred, maxMs = 10000, intervalMs = 100) => new Promise((resolve) => {
-    if (pred()) { resolve(true); return; }
-    const deadline = Date.now() + maxMs;
-    const tick = () => {
-      if (pred()) { resolve(true); return; }
-      if (Date.now() >= deadline) { resolve(false); return; }
-      setTimeout(tick, intervalMs);
-    };
-    tick();
-  });
-  const waitLoad = () => new Promise((resolve) => {
-    if (document.readyState === 'complete') resolve();
-    else window.addEventListener('load', () => resolve(), { once: true });
-  });
-  // 순서 보장용 공유 promise — CAPTCHA 관련 초기화들이 이걸 await
-  // (기본은 resolved, AUTO_CLOSE_BOOK_NOTICE 켜지면 close 대기용 promise 로 대체)
-  let bookNoticeReady = Promise.resolve();
-
-  // whenCaptchaResolved — async 버전.
-  // ★ book notice 닫기 전엔 Interpark capchaInit 이 안 실행돼 CAPTCHA 가 DOM 에
-  //   아직 없음. 따라서 book notice 닫힘 + 500ms 대기 후에 상태 판정.
-  //   이 단계를 거치지 않으면 AUTO_FLOW 가 CAPTCHA 뜨기 전에 발동함.
-  const whenCaptchaResolved = async (cb, timeoutMs = 10 * 60 * 1000) => {
-    await bookNoticeReady;
-    await wait(500);
+  const whenCaptchaResolved = (cb, timeoutMs = 10 * 60 * 1000) => {
     if (!captchaActive()) { cb(); return; }
     log('[AUTO] CAPTCHA 입력 대기 중...');
     const obs = new MutationObserver(() => {
@@ -226,7 +185,6 @@
       ${inp('SEAT_GRADE_EXCLUDE (제외 키워드)', 'text', S.SEAT_GRADE_EXCLUDE.join(', '), '__s_fexc__', '하나라도 포함되면 숨김')}
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
       ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
-      ${chk('AUTO_CLOSE_BOOK_NOTICE (예매안내 모달 자동 닫기 · CAPTCHA.js 로드 후 클릭)', S.AUTO_CLOSE_BOOK_NOTICE, '__s_closebn__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
       <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PROFILES (우선순위 배열 · 매칭된 등급의 blocks/rows/columns 적용)</div>
       ${txt('SEAT_PROFILES (JSON 배열)',
@@ -287,10 +245,9 @@
         TICKET_COUNT:       Math.max(1, parseInt($('__s_ticket__').value, 10) || 1),
         SEAT_GRADE_FILTER:  parseList($('__s_finc__').value, false),
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
-        HIDE_SOLD_OUT:          $('__s_sold__').checked,
-        AUTO_FLOW:              $('__s_auto__').checked,
-        AUTO_CLOSE_BOOK_NOTICE: $('__s_closebn__').checked,
-        CAPTCHA_SCALE:          S.CAPTCHA_SCALE,
+        HIDE_SOLD_OUT:      $('__s_sold__').checked,
+        AUTO_FLOW:          $('__s_auto__').checked,
+        CAPTCHA_SCALE:      S.CAPTCHA_SCALE,
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
           rows:    parseList($('__s_rows__').value, true),
@@ -392,45 +349,29 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 자동 닫기 — async 순서 보장 (Phase 1)
-  //   1. window.load 대기 (모든 외부 스크립트 로드 완료)
-  //   2. CAPTCHA.js 로드 완료 대기 (window.fnCheck 정의됨)
-  //   3. 500ms 안전 마진
-  //   4. closeBtn click
-  //   5. 완료 후 bookNoticeReady promise resolve → tryInitCaptcha 가 이걸 await
+  // 공통: 예매안내 팝업 자동 닫기 — 페이지당 1회만 (Interpark flow 와 race 방지)
   // =========================================================
   let bookNoticeHandled = false;
-  const closeBookNotice = () => {
+  const dismissBookNotice = () => {
     if (bookNoticeHandled) return;
     const layer = document.getElementById('divBookNoticeLayer');
     if (!layer) return;
-    if (layer.offsetParent === null) { bookNoticeHandled = true; return; }
+    if (layer.offsetParent === null) return;
     const close = layer.querySelector('.closeBtn');
     if (!close) return;
     bookNoticeHandled = true;
     close.click();
-    log('예매안내 팝업 자동 닫기 완료');
+    log('예매안내 팝업 자동 닫힘 (1회 처리)');
   };
-  // CAPTCHA.js 로드 대기 (AUTO_CLOSE_BOOK_NOTICE off 여도 CAPTCHA init 은 이걸 기다림)
-  bookNoticeReady = (async () => {
-    await waitLoad();
-    await waitUntil(() => typeof window.fnCheck === 'function', 5000);
-    if (S.AUTO_CLOSE_BOOK_NOTICE) {
-      await wait(150); // 짧은 안정화 margin
-      closeBookNotice();
-      await wait(150); // 닫기 반영 margin
-    }
-  })();
-  if (S.AUTO_CLOSE_BOOK_NOTICE) {
-    // 페이지 전환 후 재등장 대비 observer backup
-    try {
-      const bn = new MutationObserver(() => {
-        if (bookNoticeHandled) { bn.disconnect(); return; }
-        closeBookNotice();
-      });
-      bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
-    } catch (_) {}
-  }
+  dismissBookNotice();
+  try {
+    // childList 추가만 감시 (style/class 변화마다 fire 되지 않음 → 훨씬 조용)
+    const bn = new MutationObserver(() => {
+      if (bookNoticeHandled) { bn.disconnect(); return; }
+      dismissBookNotice();
+    });
+    bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
+  } catch (_) {}
 
   // =========================================================
   // 모드 1: 등급 리스트 필터 (div.list > a[sgn])
@@ -460,35 +401,25 @@
   else window.addEventListener('load', scheduleSeatMapInit, { once: true });
 
   // =========================================================
-  // 모드 3: CAPTCHA 초기화 (Phase 2 — 예매안내 닫기 이후)
-  // — bookNoticeReady await 로 Phase 1 완료 후에만 진행
-  //   순서: window.load → CAPTCHA.js ready → 예매안내 닫힘 → 여기서 CAPTCHA init
+  // 모드 3: CAPTCHA (동적 감지)
+  // — CAPTCHA 오버레이가 실제로 visible 일 때만 init (input 속성/스타일 수정)
+  //   그렇지 않으면 DOM 무간섭 (등급→좌석 flow 중 서버 validation 방해 방지)
   // =========================================================
   let captchaInited = false;
-  let captchaIniting = false;
-  const tryInitCaptcha = async () => {
-    if (captchaInited || captchaIniting) return;
-    if (!captchaActive()) return;
-    captchaIniting = true;
-    try {
-      // bookNoticeReady 내부에서 이미 waitLoad + fnCheck 대기 + 예매안내 닫기 완료
-      await bookNoticeReady;
-      if (captchaInited) return;
-      if (!captchaActive()) return;
-      const img   = findCaptchaImg();
-      const input = findCaptchaInput();
-      if (!img && !input) return;
-      captchaInited = true;
-      initCaptcha(img, input);
-    } finally {
-      captchaIniting = false;
-    }
+  const tryInitCaptcha = () => {
+    if (captchaInited) return;
+    if (!captchaActive()) return;                     // ★ 오버레이 visible 할 때만 init
+    const img   = findCaptchaImg();
+    const input = findCaptchaInput();
+    if (!img && !input) return;
+    captchaInited = true;
+    initCaptcha(img, input);
   };
   tryInitCaptcha();
   try {
-    new MutationObserver(() => { tryInitCaptcha(); }).observe(document.documentElement, {
+    new MutationObserver(tryInitCaptcha).observe(document.documentElement, {
       childList: true, subtree: true,
-      attributes: true, attributeFilter: ['style', 'class']
+      attributes: true, attributeFilter: ['style', 'class']  // visibility 변화도 감지
     });
   } catch (_) {}
 
@@ -560,11 +491,11 @@
 
     // AUTO_FLOW — CAPTCHA 통과 후 SEAT_PROFILES 우선순위대로 등급 자동 클릭
     // (좌석맵 backtrack 으로 돌아온 경우 nol_tried_grades 에 기록된 등급 제외)
-    if (S.AUTO_FLOW && !isGradeClicked() && !isAutoFlowExhausted()) {
+    if (S.AUTO_FLOW && !window.__auto_grade_clicked__ && !isAutoFlowExhausted()) {
       whenCaptchaResolved(() => {
-        if (isGradeClicked() || isAutoFlowExhausted()) return;
+        if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
         const autoPickGrade = () => {
-          if (isGradeClicked() || isAutoFlowExhausted()) return;
+          if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
           const triedGrades = (() => {
             try { return JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); }
             catch (_) { return []; }
@@ -605,7 +536,7 @@
             return;
           }
 
-          markGradeClicked();
+          window.__auto_grade_clicked__ = true;
           const tag = matchedProfile
             ? ` [profile: grade="${matchedProfile.grade || '(any)'}"]`
             : '';
@@ -624,30 +555,33 @@
   // =========================================================
   function autoClickSeatChoice() {
     if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
-
-    // ★ 엄격한 선행 조건: 등급 click 이 같은 popup session 에서 선행돼야만 진행
-    //   (AUTO_FLOW 의 체인 보장 — 독립 진입은 skip)
-    if (!isGradeClicked()) {
-      log('[AUTO] 좌석선택 skip — 등급 click 선행 안됨');
-      return;
-    }
-
     whenCaptchaResolved(() => {
       if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
       let attempts = 0;
       const tryClick = () => {
         if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
         attempts++;
+
+        // ★ 반드시 등급 auto-click 완료된 뒤에만 진행 (같은 페이지 공존 구조 대응)
+        if (!window.__auto_grade_clicked__) {
+          if (attempts < 100) setTimeout(tryClick, 150);
+          else warn('[AUTO] 등급 자동선택이 안 돼서 좌석선택 단계 진입 못함');
+          return;
+        }
+
+        // 등급 클릭 후에도 Interpark JS 가 DOM 업데이트 시간 필요
         const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
         if (!btn || btn.offsetParent === null) {
           if (attempts < 100) setTimeout(tryClick, 150);
           else warn('[AUTO] 좌석선택 버튼 visible 전환 안됨 — 수동 진행');
           return;
         }
+
         window.__auto_seatchoice_done__ = true;
         log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
         btn.click();
       };
+      // 초기 지연 제거 — 플래그 기반 대기로 충분
       tryClick();
     });
   }
@@ -1175,10 +1109,9 @@
         input.value = converted;
         input.setSelectionRange(converted.length, converted.length);
       };
-      // 한글→영문 즉시 변환 — Mac 에서 검증된 원래 방식으로 복귀
-      // (beforeinput preventDefault 는 Mac IME 와도 충돌해서 양쪽 다 망가짐)
       input.addEventListener('input', convertIfNeeded);
       input.addEventListener('compositionend', convertIfNeeded);
+      // IME 가 compositionupdate 만 발화하고 input 은 안 터뜨리는 케이스 대비
       input.addEventListener('compositionupdate', () => setTimeout(convertIfNeeded, 0));
 
       // 페이지가 input 을 display:none 으로 숨겨둬서 focus 불가인 경우 → 강제 visible
