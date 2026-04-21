@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 자동화
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.0
+// @version      1.1.1
 // @description  인터파크 KBO 구단 페이지 — 오픈 시각 자동 감지 후 예매 버튼 고속 클릭
 // @match        https://ticket.interpark.com/Contents/Sports/GoodsInfo*
 // @run-at       document-end
@@ -28,10 +28,8 @@
   // ========== 고급 설정 ==========
   const AJAX_URL              = '/Contents/Sports/GoodsInfoList';
   const AJAX_PAGE_SIZE        = 30;
-  const POLL_LEAD_MS          = 2000;
-  const POLL_FAST_LEAD_MS     = 1000;
-  const POLL_INTERVAL_SLOW_MS = 100;
-  const POLL_INTERVAL_FAST_MS = 50;
+  const POLL_LEAD_MS          = 2000;   // T-2s 부터 폴링 시작
+  const POLL_INTERVAL_MS      = 0;      // 간격 없음 — 응답 즉시 다음 요청 (RTT 가 자연 간격)
   const POLL_TIMEOUT_MS       = 120_000;
   const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000;
   const AUTO_FIRE             = true;
@@ -325,19 +323,10 @@
   }
 
   // ---- 폴링 루프 -----------------------------------------------------------
+  // T-2s 부터 `응답 → 즉시 다음` 방식. inflight 가드로 순차 실행, 간격 0ms.
   function startPolling(targetMM, targetDD, targetLocalMs) {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
-    let attempts = 0, inflight = false, phase = 'slow';
-
-    const currentInterval = () => {
-      const remaining = targetLocalMs - Date.now();
-      if (remaining > POLL_FAST_LEAD_MS) return POLL_INTERVAL_SLOW_MS;
-      if (phase === 'slow') {
-        phase = 'fast';
-        log(`⚡ 빠른 폴링 전환 (T-${POLL_FAST_LEAD_MS}ms, ${POLL_INTERVAL_FAST_MS}ms 간격)`);
-      }
-      return POLL_INTERVAL_FAST_MS;
-    };
+    let attempts = 0, inflight = false;
 
     const step = async () => {
       if (fired) return;
@@ -358,7 +347,7 @@
         renderStatus('⚠️ 폴링 실패<br><span style="font-size:11px">콘솔 확인</span>', '#c33');
         return;
       }
-      setTimeout(step, currentInterval());
+      setTimeout(step, POLL_INTERVAL_MS);
     };
     step();
   }
@@ -411,7 +400,7 @@
     }
 
     renderWaiting(openLocal);
-    log(`T-${Math.round(until/1000)}s 대기 → T-${POLL_LEAD_MS}ms(${POLL_INTERVAL_SLOW_MS}ms) / T-${POLL_FAST_LEAD_MS}ms(${POLL_INTERVAL_FAST_MS}ms)`);
+    log(`T-${Math.round(until/1000)}s 대기 → T-${POLL_LEAD_MS}ms 부터 간격 ${POLL_INTERVAL_MS}ms 폴링`);
     if (until > KEEPALIVE_INTERVAL_MS) startKeepalive();
 
     scheduleAt(targetLocalMs - POLL_LEAD_MS, () => {
