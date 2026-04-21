@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.1
+// @version      2.1.2
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -128,6 +128,7 @@
     try {
       sessionStorage.removeItem('nol_tried_grades');
       sessionStorage.removeItem('nol_auto_flow_exhausted');
+      sessionStorage.removeItem('nol_current_grade');
     } catch (_) {}
   };
 
@@ -593,10 +594,12 @@
           }
 
           window.__auto_grade_clicked__ = true;
+          const gradeSgn = target.getAttribute('sgn') || '';
+          try { sessionStorage.setItem('nol_current_grade', gradeSgn); } catch (_) {}
           const tag = matchedProfile
             ? ` [profile: grade="${matchedProfile.grade || '(any)'}"]`
             : '';
-          log(`[AUTO] 등급 자동선택${tag}: ${target.getAttribute('sgn')} (rc=${target.getAttribute('rc')})`);
+          log(`[AUTO] 등급 자동선택${tag}: ${gradeSgn} (rc=${target.getAttribute('rc')})`);
           target.click();
         };
         setTimeout(autoPickGrade, 400 + Math.floor(Math.random() * 200));
@@ -995,6 +998,64 @@
     // AUTO_FLOW — CAPTCHA 통과 후 좌석 로드 → autoPick → 좌석선택완료
     // 각 단계 사이 50ms 딜레이 (bot 탐지 완화)
     if (S.AUTO_FLOW && !window.__auto_seat_done__ && !isAutoFlowExhausted()) {
+      // SEAT_PROFILES 매칭 실패 시 이전단계로 복귀 — 다음 profile 시도
+      // reason: "빈자리 없음" / "선호 매칭 실패" 등 로그용
+      const doBacktrack = async (reason) => {
+        const profiles = S.SEAT_PROFILES || [];
+        if (profiles.length < 2) {
+          warn(`[AUTO] ${reason} — 수동 진행 필요 (SEAT_PROFILES 가 1개 이하라 backtrack 불가)`);
+          return;
+        }
+        // 현재 등급 식별 — 등급 자동선택 시 저장한 sessionStorage 가 진실의 근원
+        // (좌석 title 파싱은 좌석이 하나도 없을 때/포맷이 다를 때 실패하므로 fallback)
+        let currentGrade = '';
+        try { currentGrade = sessionStorage.getItem('nol_current_grade') || ''; } catch (_) {}
+        if (!currentGrade) {
+          const firstSeat = document.querySelector('img.stySeat[title]');
+          const title = firstSeat?.getAttribute('title') || '';
+          const m = title.match(/^\[([^\]]+)\]/);
+          if (m) currentGrade = m[1];
+        }
+
+        let triedGrades = [];
+        try { triedGrades = JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); } catch (_) {}
+        if (currentGrade && !triedGrades.includes(currentGrade)) {
+          triedGrades.push(currentGrade);
+          try { sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades)); } catch (_) {}
+        } else if (!currentGrade) {
+          // 등급 식별 완전 실패 — 같은 등급 무한 루프 방지를 위해 AUTO_FLOW 소진 처리
+          warn('[AUTO] 현재 등급 식별 실패 → AUTO_FLOW 중단 (무한 루프 방지)');
+          markAutoFlowExhausted();
+          return;
+        }
+
+        log(`[AUTO] "${currentGrade}" ${reason} → 이전 단계 복귀 (tried=${triedGrades.length})`);
+        window.__auto_seat_done__ = true;
+        await wait(400);
+        // 좌석맵은 iframe 이라 이전단계 버튼은 부모 프레임에 있음 → 다중 프레임 검색
+        const findBackBtn = () => {
+          const frames = [];
+          try { frames.push(document); } catch (_) {}
+          try { if (window.parent && window.parent !== window) frames.push(window.parent.document); } catch (_) {}
+          try { if (window.top && window.top !== window && window.top !== window.parent) frames.push(window.top.document); } catch (_) {}
+          for (const doc of frames) {
+            try {
+              const btn = doc.querySelector('a[onclick*="fnCancel" i]')
+                       || doc.querySelector('img[alt*="이전단계"]')?.closest('a');
+              if (btn && btn.offsetParent !== null) return btn;
+            } catch (_) {}
+          }
+          return null;
+        };
+        const backBtn = findBackBtn();
+        if (backBtn) {
+          log('[AUTO] 이전단계 click');
+          backBtn.click();
+        } else {
+          warn('[AUTO] 이전단계 버튼 못 찾음 — 수동 진행');
+        }
+      };
+
       whenCaptchaResolved(async () => {
         if (window.__auto_seat_done__ || isAutoFlowExhausted()) return;
         // 좌석 렌더 대기
@@ -1004,58 +1065,17 @@
           attempt++;
         }
         const availableCount = allSeats().filter(isAvailable).length;
-        if (availableCount === 0) { warn('[AUTO] 빈자리 없음'); return; }
+        if (availableCount === 0) {
+          warn('[AUTO] 빈자리 없음 — 등급 rc 와 실제 좌석 불일치');
+          await doBacktrack('빈자리 없음');
+          return;
+        }
         log(`[AUTO] 좌석 로드 감지 (avail=${availableCount}) → autoPick`);
 
         // autoPick 내부에서 좌석들을 50ms 간격으로 순차 클릭
         const picked = await autoPick();
         if (!picked) {
-          // Backtrack: SEAT_PROFILES 가 있으면 이전단계로 돌아가서 다음 프로필 시도
-          // (MAX 제한 없음 — 모든 profile 다 시도하고 소진되면 grade list 에서 감지해서
-          //  markAutoFlowExhausted 호출 → 무한 루프 방지)
-          const profiles = S.SEAT_PROFILES || [];
-          if (profiles.length >= 2) {
-            // 현재 등급 식별 (좌석 title "[등급명] ...")
-            const firstSeat = document.querySelector('img.stySeat[title]');
-            const title = firstSeat?.getAttribute('title') || '';
-            const m = title.match(/^\[([^\]]+)\]/);
-            const currentGrade = m ? m[1] : '';
-
-            let triedGrades = [];
-            try { triedGrades = JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); } catch (_) {}
-            if (currentGrade && !triedGrades.includes(currentGrade)) {
-              triedGrades.push(currentGrade);
-              sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades));
-            }
-
-            log(`[AUTO] "${currentGrade}" 선호 좌석 매칭 실패 → 이전 단계 복귀 (tried=${triedGrades.length})`);
-            window.__auto_seat_done__ = true;
-            await wait(400);
-            // 좌석맵은 iframe 이라 이전단계 버튼은 부모 프레임에 있음 → 다중 프레임 검색
-            const findBackBtn = () => {
-              const frames = [];
-              try { frames.push(document); } catch (_) {}
-              try { if (window.parent && window.parent !== window) frames.push(window.parent.document); } catch (_) {}
-              try { if (window.top && window.top !== window && window.top !== window.parent) frames.push(window.top.document); } catch (_) {}
-              for (const doc of frames) {
-                try {
-                  const btn = doc.querySelector('a[onclick*="fnCancel" i]')
-                           || doc.querySelector('img[alt*="이전단계"]')?.closest('a');
-                  if (btn && btn.offsetParent !== null) return btn;
-                } catch (_) {}
-              }
-              return null;
-            };
-            const backBtn = findBackBtn();
-            if (backBtn) {
-              log('[AUTO] 이전단계 click');
-              backBtn.click();
-            } else {
-              warn('[AUTO] 이전단계 버튼 못 찾음 — 수동 진행');
-            }
-            return;
-          }
-          warn('[AUTO] 좌석 자동선택 실패 — 수동 진행 필요');
+          await doBacktrack('선호 좌석 매칭 실패');
           return;
         }
         window.__auto_seat_done__ = true;
