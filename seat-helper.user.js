@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.3
+// @version      2.1.4
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -131,6 +131,101 @@
       sessionStorage.removeItem('nol_current_grade');
     } catch (_) {}
   };
+
+  // =========================================================
+  // triggerBacktrack — 선호 좌석 매칭 실패 시 이전단계 버튼 클릭
+  // initSeatMap 안/밖 어디서든 호출 가능해야 해서 모듈 레벨로 추출.
+  // (img.stySeat 가 하나도 없을 때 initSeatMap 자체가 호출 안 되는 케이스 대응)
+  // =========================================================
+  const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
+  async function triggerBacktrack(reason) {
+    if (window.__auto_backtrack_fired__) {
+      log(`[AUTO/backtrack] 중복 호출 skip (reason="${reason}")`);
+      return;
+    }
+    window.__auto_backtrack_fired__ = true;
+
+    log(`[AUTO/backtrack] 진입 — reason="${reason}" · url=${location.pathname}`);
+    // 전역 S 는 IIFE 시작부에서 로드됨 (이 함수는 IIFE 안 클로저)
+    const profiles = S.SEAT_PROFILES || [];
+    if (profiles.length < 2) {
+      warn(`[AUTO/backtrack] ${reason} — 수동 진행 필요 (SEAT_PROFILES 가 ${profiles.length}개라 backtrack 불가, 2개 이상 필요)`);
+      return;
+    }
+
+    let currentGrade = '';
+    let gradeSrc = '';
+    try { currentGrade = sessionStorage.getItem('nol_current_grade') || ''; } catch (_) {}
+    if (currentGrade) gradeSrc = 'sessionStorage';
+    if (!currentGrade) {
+      const firstSeat = document.querySelector('img.stySeat[title]');
+      const title = firstSeat?.getAttribute('title') || '';
+      const m = title.match(/^\[([^\]]+)\]/);
+      if (m) { currentGrade = m[1]; gradeSrc = 'title 파싱'; }
+      log(`[AUTO/backtrack] session 에 등급 없음 → title 파싱: firstSeat="${title.slice(0, 60)}" → "${currentGrade}"`);
+    }
+
+    let triedGrades = [];
+    try { triedGrades = JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); } catch (_) {}
+    log(`[AUTO/backtrack] currentGrade="${currentGrade}" (src=${gradeSrc || 'none'}), 기존 tried=${JSON.stringify(triedGrades)}`);
+
+    if (!currentGrade) {
+      warn('[AUTO/backtrack] 현재 등급 식별 실패 (session/title 둘 다 비어있음) → AUTO_FLOW 중단');
+      markAutoFlowExhausted();
+      return;
+    }
+    if (triedGrades.includes(currentGrade)) {
+      warn(`[AUTO/backtrack] "${currentGrade}" 이미 tried 에 있음 — 중복 진입, AUTO_FLOW 소진 처리`);
+      markAutoFlowExhausted();
+      return;
+    }
+    triedGrades.push(currentGrade);
+    try { sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades)); } catch (_) {}
+    log(`[AUTO/backtrack] tried 에 "${currentGrade}" 추가 → ${JSON.stringify(triedGrades)} (${triedGrades.length}/${profiles.length})`);
+
+    window.__auto_seat_done__ = true;
+    await waitMs(400);
+
+    // 좌석맵은 iframe 이라 이전단계 버튼은 부모 프레임에 있을 수 있음
+    const frames = [];
+    try { frames.push({ name: 'self', doc: document }); } catch (_) {}
+    try { if (window.parent && window.parent !== window) frames.push({ name: 'parent', doc: window.parent.document }); } catch (e) { log(`[AUTO/backtrack] parent 접근 실패: ${e.message}`); }
+    try { if (window.top && window.top !== window && window.top !== window.parent) frames.push({ name: 'top', doc: window.top.document }); } catch (e) { log(`[AUTO/backtrack] top 접근 실패: ${e.message}`); }
+    log(`[AUTO/backtrack] 프레임 ${frames.length}개 검색 (${frames.map(f => f.name).join(', ')})`);
+
+    const selectors = [
+      'a[onclick*="fnCancel" i]',
+      'a[onclick*="history.back" i]',
+      'a[onclick*="goBack" i]',
+      'img[alt*="이전단계"]',
+      'img[alt*="이전 단계"]',
+      'button[onclick*="fnCancel" i]',
+    ];
+
+    for (const { name, doc } of frames) {
+      for (const sel of selectors) {
+        try {
+          const hits = Array.from(doc.querySelectorAll(sel));
+          if (!hits.length) continue;
+          log(`  · [${name}] selector "${sel}" → ${hits.length}개 매칭`);
+          for (const h of hits) {
+            const btn = h.closest?.('a') || h;
+            const visible = btn.offsetParent !== null;
+            const onclick = btn.getAttribute?.('onclick') || '(no onclick)';
+            log(`    - visible=${visible}, onclick="${String(onclick).slice(0, 80)}"`);
+            if (visible) {
+              log(`[AUTO/backtrack] 이전단계 클릭 → frame=${name}, selector="${sel}"`);
+              btn.click();
+              return;
+            }
+          }
+        } catch (e) {
+          log(`  · [${name}] selector "${sel}" 에러: ${e.message}`);
+        }
+      }
+    }
+    warn('[AUTO/backtrack] 이전단계 버튼 못 찾음 — 수동 진행');
+  }
 
   // whenCaptchaResolved — 2-phase gate
   // phase A (looking): 호출 시점에 CAPTCHA 가 아직 active 가 아닐 수 있음
@@ -449,8 +544,39 @@
   // 그보다 먼저 들어가면 fnInit 가 기대하는 초기 state 와 충돌 → 서버가
   // '비정상 경로' 로 판정 가능. 따라서 window.load 후에만 init.
   // =========================================================
+  // seat map page 감지: img.stySeat 가 있거나, 좌석선택완료/이전단계 등 seat map
+  // 전용 마커가 있으면 seat map 페이지로 간주 (좌석 0개여도 포함)
+  const isSeatMapPage = () => {
+    if (document.querySelector('img.stySeat')) return true;
+    if (document.querySelector('a[onclick*="fnSelect" i]')) return true;
+    if (document.querySelector('a[onclick*="SeatBuffer" i]')) return true;
+    if (document.querySelector('#divSeatZoom, #divSeatArea, #SeatImg')) return true;
+    return false;
+  };
+  let seatMapTries = 0;
   const tryInitSeatMap = () => {
-    if (document.querySelector('img.stySeat')) initSeatMap();
+    if (document.querySelector('img.stySeat')) {
+      log(`[AUTO/좌석맵] img.stySeat 감지 (${document.querySelectorAll('img.stySeat').length}개) → initSeatMap 호출`);
+      initSeatMap();
+      return;
+    }
+    if (!isSeatMapPage()) return;                    // seat map 페이지가 아님 (다른 페이지)
+
+    // seat map 페이지인데 좌석이 0개 — fnInit 지연 가능성, 재시도
+    seatMapTries++;
+    if (seatMapTries === 1) {
+      log(`[AUTO/좌석맵] seat map 페이지 감지 but img.stySeat=0 — 렌더 대기 시작`);
+    }
+    if (seatMapTries < 20) {
+      if (seatMapTries % 5 === 0) log(`[AUTO/좌석맵] 좌석 렌더 대기... (${seatMapTries}/20)`);
+      setTimeout(tryInitSeatMap, 300);
+      return;
+    }
+    // 6초 기다려도 좌석 0개 → 해당 등급은 실제로 좌석이 없음 → backtrack
+    warn(`[AUTO/좌석맵] 좌석 0개 확정 (${seatMapTries}회 × 300ms 대기 후) — 빈 좌석맵으로 간주`);
+    if (S.AUTO_FLOW && !isAutoFlowExhausted()) {
+      triggerBacktrack('좌석맵 빈 페이지 (seat=0)');
+    }
   };
   // load 후 300ms 추가 지연 — fnInit 내부의 AJAX 나 지연 초기화까지 완료 대기
   const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 300);
@@ -1072,95 +1198,7 @@
     if (S.AUTO_FLOW && !window.__auto_seat_done__ && !isAutoFlowExhausted()) {
       // SEAT_PROFILES 매칭 실패 시 이전단계로 복귀 — 다음 profile 시도
       // reason: "빈자리 없음" / "선호 매칭 실패" 등 로그용
-      const doBacktrack = async (reason) => {
-        log(`[AUTO/backtrack] 진입 — reason="${reason}" · url=${location.pathname}`);
-        const profiles = S.SEAT_PROFILES || [];
-        if (profiles.length < 2) {
-          warn(`[AUTO/backtrack] ${reason} — 수동 진행 필요 (SEAT_PROFILES 가 ${profiles.length}개라 backtrack 불가, 2개 이상 필요)`);
-          return;
-        }
-        // 현재 등급 식별 — 등급 자동선택 시 저장한 sessionStorage 가 진실의 근원
-        // (좌석 title 파싱은 좌석이 하나도 없을 때/포맷이 다를 때 실패하므로 fallback)
-        let currentGrade = '';
-        let gradeSrc = '';
-        try { currentGrade = sessionStorage.getItem('nol_current_grade') || ''; } catch (_) {}
-        if (currentGrade) gradeSrc = 'sessionStorage';
-        if (!currentGrade) {
-          const firstSeat = document.querySelector('img.stySeat[title]');
-          const title = firstSeat?.getAttribute('title') || '';
-          const m = title.match(/^\[([^\]]+)\]/);
-          if (m) { currentGrade = m[1]; gradeSrc = 'title 파싱'; }
-          log(`[AUTO/backtrack] session 에 등급 없음 → title 파싱 시도: firstSeat="${title.slice(0, 60)}" → "${currentGrade}"`);
-        }
-
-        let triedGrades = [];
-        try { triedGrades = JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); } catch (_) {}
-        log(`[AUTO/backtrack] currentGrade="${currentGrade}" (src=${gradeSrc || 'none'}), 기존 tried=${JSON.stringify(triedGrades)}`);
-        if (currentGrade && !triedGrades.includes(currentGrade)) {
-          triedGrades.push(currentGrade);
-          try { sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades)); } catch (_) {}
-          log(`[AUTO/backtrack] tried 에 "${currentGrade}" 추가 → ${JSON.stringify(triedGrades)}`);
-        } else if (!currentGrade) {
-          // 등급 식별 완전 실패 — 같은 등급 무한 루프 방지를 위해 AUTO_FLOW 소진 처리
-          warn('[AUTO/backtrack] 현재 등급 식별 실패 (session/title 둘 다 비어있음) → AUTO_FLOW 중단 (무한 루프 방지)');
-          markAutoFlowExhausted();
-          return;
-        } else {
-          warn(`[AUTO/backtrack] "${currentGrade}" 는 이미 tried 에 있음 — 중복 진입 가능성, AUTO_FLOW 소진 처리`);
-          markAutoFlowExhausted();
-          return;
-        }
-
-        log(`[AUTO/backtrack] "${currentGrade}" ${reason} → 이전 단계 복귀 시도 (tried=${triedGrades.length}/${profiles.length})`);
-        window.__auto_seat_done__ = true;
-        await wait(400);
-
-        // 좌석맵은 iframe 이라 이전단계 버튼은 부모 프레임에 있음 → 다중 프레임 검색
-        // 각 프레임 후보 enumerate + 최종 선택 로그
-        const findBackBtn = () => {
-          const frames = [];
-          try { frames.push({ name: 'self', doc: document }); } catch (_) {}
-          try { if (window.parent && window.parent !== window) frames.push({ name: 'parent', doc: window.parent.document }); } catch (e) { log(`[AUTO/backtrack] parent 접근 실패: ${e.message}`); }
-          try { if (window.top && window.top !== window && window.top !== window.parent) frames.push({ name: 'top', doc: window.top.document }); } catch (e) { log(`[AUTO/backtrack] top 접근 실패: ${e.message}`); }
-          log(`[AUTO/backtrack] 프레임 ${frames.length}개 검색 (${frames.map(f => f.name).join(', ')})`);
-
-          const selectors = [
-            'a[onclick*="fnCancel" i]',
-            'a[onclick*="history.back" i]',
-            'a[onclick*="goBack" i]',
-            'img[alt*="이전단계"]',
-            'img[alt*="이전 단계"]',
-            'button[onclick*="fnCancel" i]',
-          ];
-
-          for (const { name, doc } of frames) {
-            for (const sel of selectors) {
-              try {
-                const hits = Array.from(doc.querySelectorAll(sel));
-                if (!hits.length) continue;
-                log(`  · [${name}] selector "${sel}" → ${hits.length}개 매칭`);
-                for (const h of hits) {
-                  const btn = h.closest?.('a') || h;
-                  const visible = btn.offsetParent !== null;
-                  const onclick = btn.getAttribute?.('onclick') || '(no onclick)';
-                  log(`    - visible=${visible}, onclick="${String(onclick).slice(0, 80)}"`);
-                  if (visible) return { btn, frame: name, selector: sel };
-                }
-              } catch (e) {
-                log(`  · [${name}] selector "${sel}" 에러: ${e.message}`);
-              }
-            }
-          }
-          return null;
-        };
-        const found = findBackBtn();
-        if (found) {
-          log(`[AUTO/backtrack] 이전단계 클릭 → frame=${found.frame}, selector="${found.selector}"`);
-          found.btn.click();
-        } else {
-          warn('[AUTO/backtrack] 이전단계 버튼 못 찾음 — 수동 진행');
-        }
-      };
+      const doBacktrack = (reason) => triggerBacktrack(reason);
 
       whenCaptchaResolved(async () => {
         if (window.__auto_seat_done__ || isAutoFlowExhausted()) return;
