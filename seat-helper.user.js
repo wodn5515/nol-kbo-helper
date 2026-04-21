@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.7
+// @version      2.0.8
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -39,7 +39,7 @@
     HIDE_SOLD_OUT:           false, // 잔여석 0 등급 숨김
     CAPTCHA_SCALE:           2,     // (현재 미사용) CAPTCHA 확대 배율
     AUTO_FLOW:               false, // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
-    HIDE_BOOK_NOTICE:        true,  // 예매안내 모달 CSS 로 숨김 (클릭 안 함, DOM 유지 → Interpark state 무간섭)
+    AUTO_CLOSE_BOOK_NOTICE:  true,  // 예매안내 모달 자동 닫기 (클릭) — CAPTCHA.js 로드 완료 대기 후 실행
     SEAT_PREFERENCE: {              // (fallback) SEAT_PROFILES 비어있을 때 사용
       blocks:  [],  rows: [],  columns: [],
     },
@@ -186,7 +186,7 @@
       ${inp('SEAT_GRADE_EXCLUDE (제외 키워드)', 'text', S.SEAT_GRADE_EXCLUDE.join(', '), '__s_fexc__', '하나라도 포함되면 숨김')}
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
       ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
-      ${chk('HIDE_BOOK_NOTICE (예매안내 모달 CSS 로 숨김 · 클릭 안함 안전)', S.HIDE_BOOK_NOTICE, '__s_hidebn__')}
+      ${chk('AUTO_CLOSE_BOOK_NOTICE (예매안내 모달 자동 닫기 · CAPTCHA.js 로드 후 클릭)', S.AUTO_CLOSE_BOOK_NOTICE, '__s_closebn__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
       <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PROFILES (우선순위 배열 · 매칭된 등급의 blocks/rows/columns 적용)</div>
       ${txt('SEAT_PROFILES (JSON 배열)',
@@ -249,7 +249,7 @@
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
         HIDE_SOLD_OUT:          $('__s_sold__').checked,
         AUTO_FLOW:              $('__s_auto__').checked,
-        HIDE_BOOK_NOTICE:       $('__s_hidebn__').checked,
+        AUTO_CLOSE_BOOK_NOTICE: $('__s_closebn__').checked,
         CAPTCHA_SCALE:          S.CAPTCHA_SCALE,
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
@@ -352,18 +352,45 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 CSS 숨김 — HIDE_BOOK_NOTICE 가 true 일 때
-  // 클릭 이벤트 발생 안 시키고 시각적으로만 숨김. DOM 은 그대로 → Interpark
-  // 내부 state (JSONP 초기화 등) 전혀 안 건드림.
+  // 공통: 예매안내 팝업 자동 닫기 — CAPTCHA.js 로드 완료 후에만 클릭
+  // 사용자 보고: "닫기를 눌러야 CAPTCHA 가 뜨는 듯". 즉 클릭이 CAPTCHA 초기화
+  // 트리거임. 너무 일찍 클릭하면 JSONP 콜백(jsonCallback) 세팅 전이라 에러.
+  // → window.fnCheck 함수 정의 여부로 CAPTCHA.js 로드 감지 + 500ms 마진
   // =========================================================
-  if (S.HIDE_BOOK_NOTICE) {
-    const hideStyle = document.createElement('style');
-    hideStyle.id = '__nol_hide_booknotice__';
-    hideStyle.textContent = `
-      #divBookNoticeLayer,
-      .bookNoticeLayer { display: none !important; }
-    `;
-    (document.head || document.documentElement).appendChild(hideStyle);
+  if (S.AUTO_CLOSE_BOOK_NOTICE) {
+    let bookNoticeHandled = false;
+    const closeBookNotice = () => {
+      if (bookNoticeHandled) return;
+      const layer = document.getElementById('divBookNoticeLayer');
+      if (!layer) return;
+      if (layer.offsetParent === null) { bookNoticeHandled = true; return; }
+      const close = layer.querySelector('.closeBtn');
+      if (!close) return;
+      bookNoticeHandled = true;
+      close.click();
+      log('예매안내 팝업 자동 닫기 (CAPTCHA.js ready 후)');
+    };
+    // CAPTCHA 준비 완료 감지: window.fnCheck 정의 OR imgCaptcha 존재 OR 최대 5초 타임아웃
+    const waitCaptchaReady = (cb) => {
+      const deadline = Date.now() + 5000;
+      const tick = () => {
+        if (typeof window.fnCheck === 'function' || document.getElementById('imgCaptcha')) {
+          cb(); return;
+        }
+        if (Date.now() >= deadline) { cb(); return; }
+        setTimeout(tick, 100);
+      };
+      tick();
+    };
+    waitCaptchaReady(() => setTimeout(closeBookNotice, 500));
+    // 페이지 전환 후 예매안내가 다시 뜰 수도 있으므로 observer 로 backup
+    try {
+      const bn = new MutationObserver(() => {
+        if (bookNoticeHandled) { bn.disconnect(); return; }
+        waitCaptchaReady(() => setTimeout(closeBookNotice, 500));
+      });
+      bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    } catch (_) {}
   }
 
   // =========================================================
