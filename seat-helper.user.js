@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.18
+// @version      1.1.19
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -474,6 +474,12 @@
       const tryClick = () => {
         if (window.__auto_seatchoice_done__) return;
         attempts++;
+        // 등급 리스트가 아직 보이면 (유저/AUTO 가 등급 선택 전) → 대기
+        const gradeList = document.querySelector('div.list a[sgn]');
+        if (gradeList && gradeList.offsetParent !== null) {
+          if (attempts < 50) setTimeout(tryClick, 200);
+          return;
+        }
         const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
         if (btn && btn.offsetParent !== null) {
           window.__auto_seatchoice_done__ = true;
@@ -481,7 +487,7 @@
           btn.click();
           return;
         }
-        if (attempts < 25) setTimeout(tryClick, 200);
+        if (attempts < 50) setTimeout(tryClick, 200);
         else warn('[AUTO] 좌석선택 버튼 못 찾음 — 수동 진행');
       };
       setTimeout(tryClick, 400 + Math.floor(Math.random() * 200));
