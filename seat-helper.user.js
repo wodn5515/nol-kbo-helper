@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.13
+// @version      2.0.14
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -130,23 +130,6 @@
     try { sessionStorage.setItem('nol_auto_grade_clicked', '1'); } catch (_) {}
   };
 
-  const whenCaptchaResolved = (cb, timeoutMs = 10 * 60 * 1000) => {
-    if (!captchaActive()) { cb(); return; }
-    log('[AUTO] CAPTCHA 입력 대기 중...');
-    const obs = new MutationObserver(() => {
-      if (!captchaActive()) {
-        obs.disconnect();
-        log('[AUTO] CAPTCHA 통과 감지 → 자동 진행');
-        cb();
-      }
-    });
-    obs.observe(document.documentElement, {
-      childList: true, subtree: true,
-      attributes: true, attributeFilter: ['style', 'class']
-    });
-    setTimeout(() => obs.disconnect(), timeoutMs);
-  };
-
   // =========================================================
   // 공통 유틸 — 순서 보장용
   // =========================================================
@@ -168,6 +151,29 @@
   // 순서 보장용 공유 promise — CAPTCHA 관련 초기화들이 이걸 await
   // (기본은 resolved, AUTO_CLOSE_BOOK_NOTICE 켜지면 close 대기용 promise 로 대체)
   let bookNoticeReady = Promise.resolve();
+
+  // whenCaptchaResolved — async 버전.
+  // ★ book notice 닫기 전엔 Interpark capchaInit 이 안 실행돼 CAPTCHA 가 DOM 에
+  //   아직 없음. 따라서 book notice 닫힘 + 500ms 대기 후에 상태 판정.
+  //   이 단계를 거치지 않으면 AUTO_FLOW 가 CAPTCHA 뜨기 전에 발동함.
+  const whenCaptchaResolved = async (cb, timeoutMs = 10 * 60 * 1000) => {
+    await bookNoticeReady;
+    await wait(500);
+    if (!captchaActive()) { cb(); return; }
+    log('[AUTO] CAPTCHA 입력 대기 중...');
+    const obs = new MutationObserver(() => {
+      if (!captchaActive()) {
+        obs.disconnect();
+        log('[AUTO] CAPTCHA 통과 감지 → 자동 진행');
+        cb();
+      }
+    });
+    obs.observe(document.documentElement, {
+      childList: true, subtree: true,
+      attributes: true, attributeFilter: ['style', 'class']
+    });
+    setTimeout(() => obs.disconnect(), timeoutMs);
+  };
 
   // =========================================================
   // 설정 다이얼로그 + Tampermonkey 메뉴 커맨드
