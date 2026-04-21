@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.7
+// @version      1.1.8
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -38,6 +38,7 @@
     SEAT_GRADE_EXCLUDE: [],        // 등급 제외 키워드
     HIDE_SOLD_OUT:      false,     // 잔여석 0 등급 숨김
     CAPTCHA_SCALE:      2,         // (현재 미사용) CAPTCHA 확대 배율
+    AUTO_FLOW:          false,     // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
     SEAT_PREFERENCE: {
       blocks:  [],  // 블럭 번호 (rg "413_4" 앞부분)
       rows:    [],  // 행 인덱스 ri
@@ -131,6 +132,7 @@
       ${inp('SEAT_GRADE_FILTER (포함 키워드)', 'text', S.SEAT_GRADE_FILTER.join(', '), '__s_finc__', '등급명에 포함되어야 할 키워드')}
       ${inp('SEAT_GRADE_EXCLUDE (제외 키워드)', 'text', S.SEAT_GRADE_EXCLUDE.join(', '), '__s_fexc__', '하나라도 포함되면 숨김')}
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
+      ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
       <div style="font-size:13px;color:#aaa;margin-bottom:10px">좌석 선호도 (Q 자동선택 우선순위)</div>
       ${inp('blocks (블럭 번호)', 'text', (S.SEAT_PREFERENCE.blocks || []).join(', '), '__s_blks__', '예: 413, 412')}
@@ -166,6 +168,7 @@
         SEAT_GRADE_FILTER:  parseList($('__s_finc__').value, false),
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
         HIDE_SOLD_OUT:      $('__s_sold__').checked,
+        AUTO_FLOW:          $('__s_auto__').checked,
         CAPTCHA_SCALE:      S.CAPTCHA_SCALE,
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
@@ -184,6 +187,20 @@
     GM_registerMenuCommand('↩ 설정 초기화', () => {
       if (confirm('설정을 기본값으로 복원할까요?')) { storage.del(); location.reload(); }
     });
+  }
+
+  // AUTO_FLOW ON 일 때 상단에 상태 배너 (눈에 띄게)
+  if (S.AUTO_FLOW && document.body) {
+    const b = document.createElement('div');
+    b.style.cssText = [
+      'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
+      'background:#c33', 'color:#fff',
+      'padding:6px 12px', 'font:700 12px system-ui,-apple-system,sans-serif',
+      'text-align:center', 'letter-spacing:1px',
+    ].join(';');
+    b.textContent = '⚡ AUTO_FLOW ON · CAPTCHA 입력 후 등급→좌석→완료 자동 진행';
+    document.body.appendChild(b);
+    setTimeout(() => b.remove(), 4000);
   }
   // =========================================================
 
@@ -371,6 +388,24 @@
     banner.textContent = parts.length ? `🔎 등급 필터 · ${parts.join(' · ')}` : '🔎 등급 필터 비활성';
     document.body.appendChild(banner);
     setTimeout(() => banner.remove(), 3000);
+
+    // AUTO_FLOW — 필터 결과 중 잔여석 있는 첫 등급 자동 클릭
+    if (S.AUTO_FLOW) {
+      if (window.__auto_grade_clicked__) return;
+      const autoPickGrade = () => {
+        if (window.__auto_grade_clicked__) return;
+        const visible = Array.from(list.querySelectorAll('a[sgn]'))
+          .filter(a => a.style.display !== 'none' && a.offsetParent !== null);
+        const available = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0);
+        const target = available || visible[0]; // 잔여석 있는 것 우선, 없으면 필터 통과한 첫 번째
+        if (!target) { warn('[AUTO] 자동선택 가능한 등급 없음'); return; }
+        window.__auto_grade_clicked__ = true;
+        log(`[AUTO] 등급 자동선택: ${target.getAttribute('sgn')} (rc=${target.getAttribute('rc')})`);
+        target.click();
+      };
+      // 필터/렌더 안정화 후 선택 (약간의 랜덤 지연 — 기계적 패턴 완화)
+      setTimeout(autoPickGrade, 400 + Math.floor(Math.random() * 200));
+    }
   }
 
   // =========================================================
@@ -694,6 +729,43 @@
     });
 
     log(`좌석 보조 활성화 · 매수=${S.TICKET_COUNT}`);
+
+    // AUTO_FLOW — 좌석 렌더 완료 대기 → autoPick → 좌석선택완료
+    if (S.AUTO_FLOW) {
+      if (window.__auto_seat_done__) return;
+      const waitForSeats = (attempt = 0) => {
+        if (window.__auto_seat_done__) return;
+        const availableCount = allSeats().filter(isAvailable).length;
+        if (availableCount < 3 && attempt < 30) {
+          setTimeout(() => waitForSeats(attempt + 1), 150); // 최대 4.5초 대기
+          return;
+        }
+        if (availableCount === 0) { warn('[AUTO] 빈자리 없음'); return; }
+
+        log(`[AUTO] 좌석 로드 감지 (avail=${availableCount}) → autoPick`);
+        const picked = autoPick();
+        if (!picked) { warn('[AUTO] 좌석 자동선택 실패 — 수동 진행 필요'); return; }
+
+        window.__auto_seat_done__ = true;
+        // 선택 상태가 서버에 반영될 시간 필요 (SelectSeatKBO 는 AJAX)
+        // TICKET_COUNT 매만큼 선택돼야 다음 단계로 진행 가능
+        const waitForSelection = (left = 20) => {
+          const selectedCount = allSeats().filter(isSelected).length;
+          if (selectedCount >= S.TICKET_COUNT) {
+            log(`[AUTO] ${selectedCount}매 선택 확인 → 좌석선택완료 클릭`);
+            setTimeout(() => clickNext(), 300 + Math.floor(Math.random() * 200));
+            return;
+          }
+          if (left <= 0) {
+            warn(`[AUTO] 선택 확인 실패 (${selectedCount}/${S.TICKET_COUNT}) — 수동 진행`);
+            return;
+          }
+          setTimeout(() => waitForSelection(left - 1), 100);
+        };
+        setTimeout(waitForSelection, 500);
+      };
+      setTimeout(waitForSeats, 400);
+    }
   }
 
   // =========================================================
