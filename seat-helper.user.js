@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.9
+// @version      2.0.10
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -1129,30 +1129,11 @@
         input.value = converted;
         input.setSelectionRange(converted.length, converted.length);
       };
-      // 한글→영문 즉시 변환 — beforeinput 으로 IME 가 값에 접근 전에 가로채기
-      // Windows IME 에서 input.value 를 사후 덮어쓰면 composition state 꼬임 →
-      // 글자 중복/누락 발생. beforeinput.preventDefault() 로 Hangul 삽입 자체를
-      // 취소하고 변환된 영문을 직접 insert → IME state 안 건드림.
-      input.addEventListener('beforeinput', (e) => {
-        if (e.inputType !== 'insertCompositionText' && e.inputType !== 'insertText') return;
-        const data = e.data;
-        if (!data || !hasHangul(data)) return;
-        e.preventDefault();
-        const converted = koToEn(data);
-        const start = input.selectionStart ?? input.value.length;
-        const end   = input.selectionEnd   ?? start;
-        const cur   = input.value;
-        input.value = cur.slice(0, start) + converted + cur.slice(end);
-        const pos   = start + converted.length;
-        try { input.setSelectionRange(pos, pos); } catch (_) {}
-      });
-      // Fallback: composition 아닌 경로 (붙여넣기 등) + beforeinput 미지원 환경
-      input.addEventListener('input', (e) => {
-        if (e.isComposing) return;
-        convertIfNeeded();
-      });
-      // 안전망: composition 완료됐는데 아직 한글 남아있으면 최종 치환
+      // 한글→영문 즉시 변환 — Mac 에서 검증된 원래 방식으로 복귀
+      // (beforeinput preventDefault 는 Mac IME 와도 충돌해서 양쪽 다 망가짐)
+      input.addEventListener('input', convertIfNeeded);
       input.addEventListener('compositionend', convertIfNeeded);
+      input.addEventListener('compositionupdate', () => setTimeout(convertIfNeeded, 0));
 
       // 페이지가 input 을 display:none 으로 숨겨둬서 focus 불가인 경우 → 강제 visible
       // ★ 중요: CAPTCHA 오버레이가 active 일 때만 동작. 해제 후엔 절대 DOM 건드리지 않음
