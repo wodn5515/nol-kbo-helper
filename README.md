@@ -98,22 +98,23 @@ https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.use
 ### interpark-autoclick
 날짜는 패널 UI 로 입력 (localStorage 저장). 고급 설정 필요 없음.
 
-### seat-helper — GUI 다이얼로그로 미리 설정
+### seat-helper — Tampermonkey 메뉴로 미리 설정
 
-예매 오픈 **전에 미리** KBO 구단 페이지에서 설정해두는 흐름 (예매창 들어가서 허둥지둥 안 하도록):
+예매 오픈 **전에 미리** KBO 구단 페이지에서 설정해두는 흐름:
 
 1. `ticket.interpark.com/Contents/Sports/GoodsInfo?SportsCode=07001&TeamCode=PB004` 접속
-2. 우측 하단 **"⚙️ 좌석 보조 설정"** 버튼 클릭
-3. 모달에서 값 입력 (매수, 등급 필터, 선호 블럭/행/열 등)
-4. **"💾 저장 & 새로고침"** 클릭 → 저장됨
-5. 설정은 브라우저(Tampermonkey GM storage)에 영속 저장 → 나중에 예매 팝업 열리면 자동 적용
+2. 브라우저 툴바 **🐵 Tampermonkey 아이콘** 클릭
+3. "인터파크 KBO 예매 보조" 스크립트 아래 **"⚙️ 설정 열기"** 선택
+4. 모달에서 값 입력 (매수, 등급 필터, 선호 블럭/행/열 등)
+5. **"💾 저장 & 새로고침"** 클릭 → 저장됨
+6. 설정은 Tampermonkey GM storage 에 영속 저장 → 나중에 예매 팝업 열리면 자동 적용
 
 **저장 후 동작**
 - **등급 리스트 화면** (예매 팝업 첫 단계): 저장된 `SEAT_GRADE_FILTER`/`EXCLUDE` 로 자동 필터링
 - **좌석맵**: 선호 블럭/행/열 자동 하이라이트(주황), Q 키 자동선택 우선순위 적용
 - **CAPTCHA**: 자동 포커스 + 한↔영 자판 변환
 
-> 예매 팝업 안에서도 같은 ⚙️ 버튼으로 설정 변경 가능하지만, 타이머 도는 중이라 급함. 미리 하는 걸 권장.
+> 예매 팝업 자체는 브라우저 확장 아이콘 접근 불가. 반드시 예매 오픈 **전에** 구단 페이지에서 설정 완료해둘 것.
 
 **설정 항목**
 | 필드 | 설명 | 입력 예시 |
