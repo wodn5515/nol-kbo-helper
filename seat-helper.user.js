@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.14
+// @version      1.1.15
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -344,8 +344,15 @@
 
   // =========================================================
   // 모드 2: 좌석맵 (img.stySeat)
+  // body onload="fnInit()" 이 좌석 초기화를 수행. 우리 DOM 수정(CSS/HUD) 이
+  // 그보다 먼저 들어가면 fnInit 가 기대하는 초기 state 와 충돌 → 서버가
+  // '비정상 경로' 로 판정 가능. 따라서 window.load 후에만 init.
   // =========================================================
-  if (document.querySelector('img.stySeat')) initSeatMap();
+  const tryInitSeatMap = () => {
+    if (document.querySelector('img.stySeat')) initSeatMap();
+  };
+  if (document.readyState === 'complete') tryInitSeatMap();
+  else window.addEventListener('load', tryInitSeatMap, { once: true });
 
   // =========================================================
   // 모드 3: CAPTCHA (동적 감지)
