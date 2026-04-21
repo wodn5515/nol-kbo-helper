@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.10
+// @version      2.0.11
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -134,6 +134,28 @@
     });
     setTimeout(() => obs.disconnect(), timeoutMs);
   };
+
+  // =========================================================
+  // 공통 유틸 — 순서 보장용
+  // =========================================================
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+  const waitUntil = (pred, maxMs = 10000, intervalMs = 100) => new Promise((resolve) => {
+    if (pred()) { resolve(true); return; }
+    const deadline = Date.now() + maxMs;
+    const tick = () => {
+      if (pred()) { resolve(true); return; }
+      if (Date.now() >= deadline) { resolve(false); return; }
+      setTimeout(tick, intervalMs);
+    };
+    tick();
+  });
+  const waitLoad = () => new Promise((resolve) => {
+    if (document.readyState === 'complete') resolve();
+    else window.addEventListener('load', () => resolve(), { once: true });
+  });
+  // 순서 보장용 공유 promise — CAPTCHA 관련 초기화들이 이걸 await
+  // (기본은 resolved, AUTO_CLOSE_BOOK_NOTICE 켜지면 close 대기용 promise 로 대체)
+  let bookNoticeReady = Promise.resolve();
 
   // =========================================================
   // 설정 다이얼로그 + Tampermonkey 메뉴 커맨드
@@ -352,42 +374,38 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 자동 닫기 — CAPTCHA.js 로드 완료 후에만 클릭
-  // 사용자 보고: "닫기를 눌러야 CAPTCHA 가 뜨는 듯". 즉 클릭이 CAPTCHA 초기화
-  // 트리거임. 너무 일찍 클릭하면 JSONP 콜백(jsonCallback) 세팅 전이라 에러.
-  // → window.fnCheck 함수 정의 여부로 CAPTCHA.js 로드 감지 + 500ms 마진
+  // 공통: 예매안내 팝업 자동 닫기 — async 순서 보장 (Phase 1)
+  //   1. window.load 대기 (모든 외부 스크립트 로드 완료)
+  //   2. CAPTCHA.js 로드 완료 대기 (window.fnCheck 정의됨)
+  //   3. 500ms 안전 마진
+  //   4. closeBtn click
+  //   5. 완료 후 bookNoticeReady promise resolve → tryInitCaptcha 가 이걸 await
   // =========================================================
+  let bookNoticeHandled = false;
+  const closeBookNotice = () => {
+    if (bookNoticeHandled) return;
+    const layer = document.getElementById('divBookNoticeLayer');
+    if (!layer) return;
+    if (layer.offsetParent === null) { bookNoticeHandled = true; return; }
+    const close = layer.querySelector('.closeBtn');
+    if (!close) return;
+    bookNoticeHandled = true;
+    close.click();
+    log('예매안내 팝업 자동 닫기 완료');
+  };
   if (S.AUTO_CLOSE_BOOK_NOTICE) {
-    let bookNoticeHandled = false;
-    const closeBookNotice = () => {
-      if (bookNoticeHandled) return;
-      const layer = document.getElementById('divBookNoticeLayer');
-      if (!layer) return;
-      if (layer.offsetParent === null) { bookNoticeHandled = true; return; }
-      const close = layer.querySelector('.closeBtn');
-      if (!close) return;
-      bookNoticeHandled = true;
-      close.click();
-      log('예매안내 팝업 자동 닫기 (CAPTCHA.js ready 후)');
-    };
-    // CAPTCHA 준비 완료 감지: window.fnCheck 정의 OR imgCaptcha 존재 OR 최대 5초 타임아웃
-    const waitCaptchaReady = (cb) => {
-      const deadline = Date.now() + 5000;
-      const tick = () => {
-        if (typeof window.fnCheck === 'function' || document.getElementById('imgCaptcha')) {
-          cb(); return;
-        }
-        if (Date.now() >= deadline) { cb(); return; }
-        setTimeout(tick, 100);
-      };
-      tick();
-    };
-    waitCaptchaReady(() => setTimeout(closeBookNotice, 500));
-    // 페이지 전환 후 예매안내가 다시 뜰 수도 있으므로 observer 로 backup
+    bookNoticeReady = (async () => {
+      await waitLoad();
+      await waitUntil(() => typeof window.fnCheck === 'function' || document.getElementById('imgCaptcha'), 5000);
+      await wait(500);
+      closeBookNotice();
+      await wait(300);  // 닫기 처리 안정화
+    })();
+    // 페이지 전환 후 재등장 대비 observer backup
     try {
       const bn = new MutationObserver(() => {
         if (bookNoticeHandled) { bn.disconnect(); return; }
-        waitCaptchaReady(() => setTimeout(closeBookNotice, 500));
+        closeBookNotice();
       });
       bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
     } catch (_) {}
@@ -421,25 +439,34 @@
   else window.addEventListener('load', scheduleSeatMapInit, { once: true });
 
   // =========================================================
-  // 모드 3: CAPTCHA (동적 감지)
-  // — CAPTCHA 오버레이가 실제로 visible 일 때만 init (input 속성/스타일 수정)
-  //   그렇지 않으면 DOM 무간섭 (등급→좌석 flow 중 서버 validation 방해 방지)
+  // 모드 3: CAPTCHA 초기화 (Phase 2 — 예매안내 닫기 이후)
+  // — bookNoticeReady await 로 Phase 1 완료 후에만 진행
+  //   순서: window.load → CAPTCHA.js ready → 예매안내 닫힘 → 여기서 CAPTCHA init
   // =========================================================
   let captchaInited = false;
-  const tryInitCaptcha = () => {
-    if (captchaInited) return;
-    if (!captchaActive()) return;                     // ★ 오버레이 visible 할 때만 init
-    const img   = findCaptchaImg();
-    const input = findCaptchaInput();
-    if (!img && !input) return;
-    captchaInited = true;
-    initCaptcha(img, input);
+  let captchaIniting = false;
+  const tryInitCaptcha = async () => {
+    if (captchaInited || captchaIniting) return;
+    if (!captchaActive()) return;
+    captchaIniting = true;
+    try {
+      await bookNoticeReady;                            // Phase 1 완료 대기
+      if (captchaInited) return;
+      if (!captchaActive()) return;                     // 대기 중에 overlay 닫혔으면 skip
+      const img   = findCaptchaImg();
+      const input = findCaptchaInput();
+      if (!img && !input) return;
+      captchaInited = true;
+      initCaptcha(img, input);
+    } finally {
+      captchaIniting = false;
+    }
   };
   tryInitCaptcha();
   try {
-    new MutationObserver(tryInitCaptcha).observe(document.documentElement, {
+    new MutationObserver(() => { tryInitCaptcha(); }).observe(document.documentElement, {
       childList: true, subtree: true,
-      attributes: true, attributeFilter: ['style', 'class']  // visibility 변화도 감지
+      attributes: true, attributeFilter: ['style', 'class']
     });
   } catch (_) {}
 
