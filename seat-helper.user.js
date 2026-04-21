@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.4
+// @version      2.0.5
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -521,12 +521,17 @@
             });
             if (hit) { target = hit; matchedProfile = p; break; }
           }
-          // 프로필 매칭 없으면 rc>0 첫 등급
-          if (!target) {
+          // SEAT_PROFILES 비어있을 때만 legacy fallback (rc>0 첫 등급)
+          // 프로필이 있으면 지정된 등급 외엔 절대 선택 안 함 — 오선택 방지
+          if (!target && profiles.length === 0) {
             target = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0) || visible[0];
           }
           if (!target) {
-            warn('[AUTO] 시도 가능한 등급 소진 — AUTO_FLOW 중단 (이 창에서 재시도 안함)');
+            if (profiles.length) {
+              warn('[AUTO] SEAT_PROFILES 매칭 등급 없음 — AUTO_FLOW 중단 (빈 fallback profile 추가하면 아무 등급이나 잡힘)');
+            } else {
+              warn('[AUTO] 시도 가능한 등급 소진 — AUTO_FLOW 중단');
+            }
             markAutoFlowExhausted();
             return;
           }
