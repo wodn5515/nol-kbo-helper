@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.8
+// @version      2.1.9
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -113,6 +113,33 @@
     });
   } catch (e) {
     console.warn('[HELPER] jsonCallback shim 설치 실패:', e.message);
+  }
+
+  // =========================================================
+  // [alert shim] 좌석 매진/중복 관련 alert() 자동 dismiss
+  // alert() 은 UI 블록이라 "OK 버튼 누르기" 를 코드로 할 수 없음 — 함수 자체를
+  // 가로채는 방법이 유일. 매진/판매종료/이미선택됨 등 AUTO_FLOW 에서 치명적이지
+  // 않은 메시지만 dismiss 하고 나머지는 원본 alert 호출 (중요 메시지 보존).
+  // =========================================================
+  try {
+    const origAlert = window.alert.bind(window);
+    const DISMISS_PATTERN = /이미\s*선택|선택.*좌석|판매.*(마감|종료|완료)|매진|예매.*불가|판매된\s*좌석|선택.*불가/;
+    window.alert = function (msg) {
+      const m = String(msg == null ? '' : msg);
+      if (DISMISS_PATTERN.test(m)) {
+        console.log('%c[HELPER/alert]', 'color:#0af;font-weight:bold', `좌석관련 alert auto-dismiss: "${m}"`);
+        // AUTO_FLOW 가 다시 시도할 수 있도록 seat 단계 플래그 해제
+        try {
+          window.__auto_seat_done__        = false;
+          window.__auto_backtrack_fired__  = false;
+          window.__auto_seatchoice_done__  = false;
+        } catch (_) {}
+        return;
+      }
+      return origAlert(msg);
+    };
+  } catch (e) {
+    console.warn('[HELPER] alert shim 설치 실패:', e.message);
   }
 
   // =========================================================
@@ -643,36 +670,50 @@
     if (document.querySelector('#divSeatZoom, #divSeatArea, #SeatImg')) return true;
     return false;
   };
-  // 좌석 렌더 대기는 거의 없게 — 좌석 0개면 해당 등급에 실제 좌석 없는 것이므로
-  // 즉시 backtrack. fnInit 이 AJAX 로 늦게 주입하는 케이스 대비 최소한의 재시도만.
-  // (총 대기 < 500ms 목표)
-  const SEATMAP_MAX_TRIES  = 2;   // 2 회 × 150ms = 300ms 추가 대기
-  const SEATMAP_RETRY_INT  = 150;
-  let seatMapTries = 0;
+  // 좌석 렌더 대기 — 고정 폴링 대신 MutationObserver 로 img.stySeat 등장 즉시 감지.
+  // fnInit AJAX 가 500ms/1s/1.5s 중 언제 끝나든 첫 좌석 붙자마자 init 호출.
+  // 하드 타임아웃만 SEATMAP_MAX_WAIT_MS 로 상한. 그 시간까지 좌석 0개면 실제 없음 → backtrack.
+  const SEATMAP_MAX_WAIT_MS = 2000;
+  let seatMapSettled = false;
   const tryInitSeatMap = () => {
+    if (seatMapSettled) return;
     if (document.querySelector('img.stySeat')) {
-      log(`[AUTO/좌석맵] img.stySeat 감지 (${document.querySelectorAll('img.stySeat').length}개) → initSeatMap 호출`);
+      seatMapSettled = true;
+      log(`[AUTO/좌석맵] img.stySeat 즉시 감지 (${document.querySelectorAll('img.stySeat').length}개) → initSeatMap`);
       initSeatMap();
       return;
     }
     if (!isSeatMapPage()) return;                    // seat map 페이지가 아님
 
-    seatMapTries++;
-    if (seatMapTries === 1) {
-      log(`[AUTO/좌석맵] seat map 페이지 감지 but img.stySeat=0 — 짧게 ${SEATMAP_MAX_TRIES}×${SEATMAP_RETRY_INT}ms 만 대기`);
-    }
-    if (seatMapTries <= SEATMAP_MAX_TRIES) {
-      setTimeout(tryInitSeatMap, SEATMAP_RETRY_INT);
-      return;
-    }
-    // 짧은 대기 후에도 여전히 0개 → 즉시 backtrack
-    warn(`[AUTO/좌석맵] 좌석 0개 확정 (${seatMapTries-1}회 × ${SEATMAP_RETRY_INT}ms 대기 후) — 즉시 이전단계`);
-    if (S.AUTO_FLOW && !isAutoFlowExhausted()) {
-      triggerBacktrack('좌석맵 빈 페이지 (seat=0)');
-    }
+    log(`[AUTO/좌석맵] seat map 페이지 감지 but img.stySeat=0 — MutationObserver 대기 (max ${SEATMAP_MAX_WAIT_MS}ms)`);
+    const startedAt = Date.now();
+
+    const finalize = (reason) => {
+      if (seatMapSettled) return;
+      seatMapSettled = true;
+      try { obs.disconnect(); } catch (_) {}
+      clearTimeout(tmo);
+      const count = document.querySelectorAll('img.stySeat').length;
+      const elapsed = Date.now() - startedAt;
+      if (count > 0) {
+        log(`[AUTO/좌석맵] 좌석 ${count}개 감지 (${elapsed}ms, ${reason}) → initSeatMap`);
+        initSeatMap();
+      } else {
+        warn(`[AUTO/좌석맵] 좌석 0개 확정 (${elapsed}ms, ${reason}) → 이전단계`);
+        if (S.AUTO_FLOW && !isAutoFlowExhausted()) {
+          triggerBacktrack('좌석맵 빈 페이지 (seat=0)');
+        }
+      }
+    };
+
+    const obs = new MutationObserver(() => {
+      if (document.querySelector('img.stySeat')) finalize('MutationObserver');
+    });
+    obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    const tmo = setTimeout(() => finalize('timeout'), SEATMAP_MAX_WAIT_MS);
   };
-  // load 후 150ms 지연 — fnInit 이 synchronous 하게 주입하는 경우 대응, 짧게
-  const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 150);
+  // load 후 100ms 지연 — synchronous 렌더 케이스 대응
+  const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 100);
   if (document.readyState === 'complete') scheduleSeatMapInit();
   else window.addEventListener('load', scheduleSeatMapInit, { once: true });
 
