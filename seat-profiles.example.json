@@ -1,0 +1,26 @@
+[
+  {
+    "grade": "메디힐존",
+    "blocks": [],
+    "rows": [],
+    "columns": []
+  },
+  {
+    "grade": "KMI한국의학연구소존",
+    "blocks": [],
+    "rows": [],
+    "columns": []
+  },
+  {
+    "grade": "3루 레드석",
+    "blocks": [223],
+    "rows": [],
+    "columns": []
+  },
+  {
+    "grade": "3루 블루석",
+    "blocks": [218],
+    "rows": [],
+    "columns": []
+  }
+]
