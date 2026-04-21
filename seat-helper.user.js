@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.0
+// @version      2.0.1
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -960,9 +960,24 @@
             log(`[AUTO] "${currentGrade}" 선호 좌석 매칭 실패 → 이전 단계 복귀 (tried=${triedGrades.length})`);
             window.__auto_seat_done__ = true;
             await wait(400);
-            const backBtn = document.querySelector('a[onclick*="fnCancel" i]')
-                         || document.querySelector('img[alt*="이전단계"]')?.closest('a');
+            // 좌석맵은 iframe 이라 이전단계 버튼은 부모 프레임에 있음 → 다중 프레임 검색
+            const findBackBtn = () => {
+              const frames = [];
+              try { frames.push(document); } catch (_) {}
+              try { if (window.parent && window.parent !== window) frames.push(window.parent.document); } catch (_) {}
+              try { if (window.top && window.top !== window && window.top !== window.parent) frames.push(window.top.document); } catch (_) {}
+              for (const doc of frames) {
+                try {
+                  const btn = doc.querySelector('a[onclick*="fnCancel" i]')
+                           || doc.querySelector('img[alt*="이전단계"]')?.closest('a');
+                  if (btn && btn.offsetParent !== null) return btn;
+                } catch (_) {}
+              }
+              return null;
+            };
+            const backBtn = findBackBtn();
             if (backBtn) {
+              log('[AUTO] 이전단계 click');
               backBtn.click();
             } else {
               warn('[AUTO] 이전단계 버튼 못 찾음 — 수동 진행');
