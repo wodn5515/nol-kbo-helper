@@ -95,31 +95,31 @@ https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.use
 
 ## 설정 커스터마이징
 
-각 `.user.js` 파일 상단 주석 아래 `// ========== 설정 ==========` 블럭 수정:
-
 ### interpark-autoclick
-기본 설정 거의 손댈 필요 없음. 날짜는 패널에서 GUI 로 입력.
+날짜는 패널 UI 로 입력 (localStorage 저장). 고급 설정 필요 없음.
 
-### seat-helper
-```js
-const TICKET_COUNT       = 3;                          // 매수
-const SEAT_GRADE_FILTER  = ['3루', '중앙'];             // 포함 키워드
-const SEAT_GRADE_EXCLUDE = ['휠체어', '테이블'];        // 제외 키워드
-const HIDE_SOLD_OUT      = false;                      // 매진 등급 숨김
-const CAPTCHA_SCALE      = 2;                          // CAPTCHA 이미지 배율 (미사용)
+### seat-helper — Tampermonkey 메뉴에서 GUI 로 설정
 
-const SEAT_PREFERENCE = {
-  blocks:  [],  // 예: [413, 412] — 블럭 번호
-  rows:    [],  // 예: [3, 4, 5]  — 행 인덱스 ri
-  columns: [],  // 예: [0, 2, 4]  — 열 인덱스 ci (좌→우 순서)
-};
-```
+`poticket.interpark.com` 페이지에서:
 
-**수정 방법**
-1. 🐵 아이콘 → 대시보드 → 스크립트 이름 클릭
-2. 에디터에서 값 수정
-3. `Cmd+S` (or `Ctrl+S`) 저장
-4. 대상 페이지 새로고침 시 적용
+1. 🐵 (Tampermonkey 아이콘) 클릭 → **"⚙️ 설정 열기"** 선택
+2. 모달 창에서 값 입력
+3. **"💾 저장 & 새로고침"** 클릭 → 자동으로 페이지 reload, 새 설정 적용
+
+**설정 항목**
+| 필드 | 설명 | 입력 예시 |
+|---|---|---|
+| `TICKET_COUNT` | 매수 (연속석 자동 선택 수) | `2` |
+| `SEAT_GRADE_FILTER` | 등급 포함 키워드 (쉼표 구분) | `3루, 중앙` |
+| `SEAT_GRADE_EXCLUDE` | 등급 제외 키워드 | `휠체어, 테이블` |
+| `HIDE_SOLD_OUT` | 매진 등급 숨김 | 체크박스 |
+| `blocks` | 선호 블럭 번호 | `413, 412` |
+| `rows` | 선호 행 인덱스 ri | `3, 4, 5` |
+| `columns` | 선호 열 인덱스 ci | `0, 2, 4, 6` |
+
+**초기화**: 메뉴 **"↩ 설정 초기화"** 또는 다이얼로그 내 **"↩ 기본값"** 버튼
+
+저장소: Tampermonkey GM storage (기기별 독립). 업데이트 받아도 보존됨. 스크립트를 삭제하면 초기화됨.
 
 ## 업데이트
 

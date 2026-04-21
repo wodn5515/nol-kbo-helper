@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.0
+// @version      1.1.1
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
 // @run-at       document-end
-// @grant        none
 // @all-frames   true
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
 // @updateURL    https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.user.js
 // ==/UserScript==
@@ -15,35 +18,173 @@
 // ============================================================
 // 인터파크 KBO 예매 팝업 보조
 // ▶ 기능
-//   [등급 리스트]  SEAT_GRADE_FILTER 키워드 포함 등급만 표시, 나머지 숨김
+//   [등급 리스트]  등급 키워드 필터 (포함/제외)
 //   [좌석맵]       시각화(가능/매진/선택됨 구분) + HUD +
-//                 연속 좌석 자동 선택 (TICKET_COUNT 매, 같은 행 양옆 균형)
+//                 연속 좌석 자동 선택 (같은 행 양옆 균형)
 //                 Q: 임의 연속석 자동 / E: hover클릭 / 클릭: 동료 자동 추가
 //   [CAPTCHA]     이미지 확대 + 입력란 auto-focus + Enter 제출
 //   [공통]        Enter = "다음" 버튼 클릭
 // ============================================================
 
 (() => {
-  // ========== 설정 ==========
-  const TICKET_COUNT       = 3;                                   // 매수 (연속석 자동 선택 수)
-  const SEAT_GRADE_FILTER  = ['3루', '중앙'];                     // 포함 키워드 (OR, 부분일치) · 빈 배열 = 필터 없음
-  const SEAT_GRADE_EXCLUDE = ['휠체어', '테이블'];  // 제외 키워드 (하나라도 포함 시 숨김) · 빈 배열 = 제외 없음
-  const HIDE_SOLD_OUT      = false;                               // true 면 잔여석 0(rc="0") 등급도 숨김
-
-  // 좌석 선호도 — Q 자동선택 우선순위 & 하이라이트 (비어있으면 선호 없음, 배열 앞쪽일수록 우선)
-  // 주의: ci 값은 보통 0,2,4,6... 처럼 2씩 증가 (블럭 레이아웃에 따라 다름)
-  const SEAT_PREFERENCE = {
-    blocks:  [],  // 예: [413, 412] — 블럭 번호 (rg "413_4" 앞부분)
-    rows:    [],                     // 예: [3, 4, 5, 6] — 행 인덱스 ri
-    columns: [],              // 예: [0,2,4,6] — 열 인덱스 ci (좌→우 순서)
+  // ========================================================================
+  // 설정: Tampermonkey 아이콘 → "⚙️ 설정 열기" 메뉴로 변경 가능
+  // (아래 DEFAULT_SETTINGS 는 최초 설치 시 기본값. 저장소에 값 있으면 그게 우선)
+  // ========================================================================
+  const DEFAULT_SETTINGS = {
+    TICKET_COUNT:       2,         // 매수 (연속석 자동 선택 수)
+    SEAT_GRADE_FILTER:  [],        // 등급 포함 키워드 (OR, 부분일치)
+    SEAT_GRADE_EXCLUDE: [],        // 등급 제외 키워드
+    HIDE_SOLD_OUT:      false,     // 잔여석 0 등급 숨김
+    CAPTCHA_SCALE:      2,         // (현재 미사용) CAPTCHA 확대 배율
+    SEAT_PREFERENCE: {
+      blocks:  [],  // 블럭 번호 (rg "413_4" 앞부분)
+      rows:    [],  // 행 인덱스 ri
+      columns: [],  // 열 인덱스 ci (좌→우 순서)
+    },
   };
-  // ==========================
+  const SETTINGS_KEY = 'nol_kbo_seat_helper_settings';
+
+  // GM_* 또는 localStorage 폴백
+  const storage = {
+    get: () => {
+      try {
+        if (typeof GM_getValue !== 'undefined') return GM_getValue(SETTINGS_KEY, null);
+        const raw = localStorage.getItem(SETTINGS_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (_) { return null; }
+    },
+    set: (v) => {
+      try {
+        if (typeof GM_setValue !== 'undefined') GM_setValue(SETTINGS_KEY, v);
+        else localStorage.setItem(SETTINGS_KEY, JSON.stringify(v));
+      } catch (e) { console.error('[HELPER] 설정 저장 실패', e); }
+    },
+    del: () => {
+      try {
+        if (typeof GM_deleteValue !== 'undefined') GM_deleteValue(SETTINGS_KEY);
+        else localStorage.removeItem(SETTINGS_KEY);
+      } catch (_) {}
+    },
+  };
+
+  const loadSettings = () => {
+    const stored = storage.get();
+    if (!stored || typeof stored !== 'object') return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      SEAT_PREFERENCE: { ...DEFAULT_SETTINGS.SEAT_PREFERENCE, ...(stored.SEAT_PREFERENCE || {}) },
+    };
+  };
+  const S = loadSettings();
+  // ========================================================================
 
   if (window.__seat_helper_loaded__) { console.warn('[HELPER] 이미 로드됨'); return; }
   window.__seat_helper_loaded__ = true;
 
   const log  = (...a) => console.log('%c[HELPER]', 'color:#0af;font-weight:bold', ...a);
   const warn = (...a) => console.warn('%c[HELPER]', 'color:#fa0;font-weight:bold', ...a);
+
+  // =========================================================
+  // 설정 다이얼로그 + Tampermonkey 메뉴 커맨드
+  // =========================================================
+  function openSettingsDialog() {
+    const existing = document.getElementById('__nol_settings_modal__');
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.id = '__nol_settings_modal__';
+    backdrop.style.cssText = [
+      'position:fixed', 'inset:0', 'background:rgba(0,0,0,.7)',
+      'z-index:2147483646', 'display:flex', 'align-items:center', 'justify-content:center',
+      'font-family:system-ui,-apple-system,sans-serif'
+    ].join(';');
+
+    const panel = document.createElement('div');
+    panel.style.cssText = [
+      'background:#1a1a1a', 'color:#eee', 'padding:24px 28px', 'border-radius:14px',
+      'min-width:460px', 'max-width:90vw', 'max-height:85vh', 'overflow:auto',
+      'box-shadow:0 20px 60px rgba(0,0,0,.8)', 'border:1px solid #333'
+    ].join(';');
+
+    const inp = (label, type, value, id, hint = '') => `
+      <label style="display:block;margin-bottom:14px">
+        <div style="font-size:12px;color:#aaa;margin-bottom:4px">${label}${hint ? ` <span style="color:#666">· ${hint}</span>` : ''}</div>
+        <input id="${id}" type="${type}" value="${value}"
+          style="width:100%;padding:8px 10px;background:#0d0d0d;border:1px solid #444;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box;font-family:monospace">
+      </label>`;
+    const chk = (label, checked, id) => `
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:13px;cursor:pointer">
+        <input id="${id}" type="checkbox" ${checked ? 'checked' : ''} style="width:16px;height:16px">
+        ${label}
+      </label>`;
+
+    panel.innerHTML = `
+      <h2 style="margin:0 0 16px;font-size:18px">⚙️ 예매 보조 설정</h2>
+      <div style="font-size:11px;color:#888;margin-bottom:16px;line-height:1.5">
+        배열 값은 쉼표로 구분 (예: <code style="color:#0cf">3루, 중앙</code>).<br>
+        숫자 배열도 쉼표 구분 (예: <code style="color:#0cf">413, 412</code>).
+      </div>
+      ${inp('TICKET_COUNT (매수)', 'number', S.TICKET_COUNT, '__s_ticket__', '연속석 자동 선택 수')}
+      ${inp('SEAT_GRADE_FILTER (포함 키워드)', 'text', S.SEAT_GRADE_FILTER.join(', '), '__s_finc__', '등급명에 포함되어야 할 키워드')}
+      ${inp('SEAT_GRADE_EXCLUDE (제외 키워드)', 'text', S.SEAT_GRADE_EXCLUDE.join(', '), '__s_fexc__', '하나라도 포함되면 숨김')}
+      ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
+      <hr style="border:0;border-top:1px solid #333;margin:16px 0">
+      <div style="font-size:13px;color:#aaa;margin-bottom:10px">좌석 선호도 (Q 자동선택 우선순위)</div>
+      ${inp('blocks (블럭 번호)', 'text', (S.SEAT_PREFERENCE.blocks || []).join(', '), '__s_blks__', '예: 413, 412')}
+      ${inp('rows (행 ri)', 'text', (S.SEAT_PREFERENCE.rows || []).join(', '), '__s_rows__', '예: 3, 4, 5')}
+      ${inp('columns (열 ci)', 'text', (S.SEAT_PREFERENCE.columns || []).join(', '), '__s_cols__', '예: 0, 2, 4, 6')}
+      <div style="margin-top:20px;display:flex;gap:8px;justify-content:flex-end">
+        <button id="__s_reset__" style="padding:8px 16px;background:#444;color:#fff;border:0;border-radius:6px;cursor:pointer;font-size:13px">↩ 기본값</button>
+        <button id="__s_cancel__" style="padding:8px 16px;background:#444;color:#fff;border:0;border-radius:6px;cursor:pointer;font-size:13px">취소</button>
+        <button id="__s_save__" style="padding:8px 20px;background:#0a8;color:#fff;border:0;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">💾 저장 & 새로고침</button>
+      </div>
+    `;
+
+    const close = () => backdrop.remove();
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
+
+    const $ = (id) => document.getElementById(id);
+    const parseList = (str, asNumber) => {
+      return str.split(',').map(x => x.trim()).filter(Boolean)
+        .map(v => asNumber ? (isNaN(+v) ? v : +v) : v);
+    };
+
+    $('__s_cancel__').onclick = close;
+    $('__s_reset__').onclick = () => {
+      if (!confirm('설정을 기본값으로 복원할까요?')) return;
+      storage.del();
+      location.reload();
+    };
+    $('__s_save__').onclick = () => {
+      const next = {
+        TICKET_COUNT:       Math.max(1, parseInt($('__s_ticket__').value, 10) || 1),
+        SEAT_GRADE_FILTER:  parseList($('__s_finc__').value, false),
+        SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
+        HIDE_SOLD_OUT:      $('__s_sold__').checked,
+        CAPTCHA_SCALE:      S.CAPTCHA_SCALE,
+        SEAT_PREFERENCE: {
+          blocks:  parseList($('__s_blks__').value, true),
+          rows:    parseList($('__s_rows__').value, true),
+          columns: parseList($('__s_cols__').value, true),
+        },
+      };
+      storage.set(next);
+      log('설정 저장됨', next);
+      location.reload();
+    };
+  }
+
+  if (typeof GM_registerMenuCommand !== 'undefined') {
+    GM_registerMenuCommand('⚙️ 설정 열기', openSettingsDialog);
+    GM_registerMenuCommand('↩ 설정 초기화', () => {
+      if (confirm('설정을 기본값으로 복원할까요?')) { storage.del(); location.reload(); }
+    });
+  }
+  // =========================================================
 
   // =========================================================
   // 공통: "다음" Enter 단축키
@@ -138,9 +279,9 @@
         const sgn = a.getAttribute('sgn') || '';
         const rc  = parseInt(a.getAttribute('rc') || '0', 10);
 
-        const matchInc  = SEAT_GRADE_FILTER.length === 0 || SEAT_GRADE_FILTER.some(kw => sgn.includes(kw));
-        const matchExc  = SEAT_GRADE_EXCLUDE.length === 0 || !SEAT_GRADE_EXCLUDE.some(kw => sgn.includes(kw));
-        const matchSold = !HIDE_SOLD_OUT || rc > 0;
+        const matchInc  = S.SEAT_GRADE_FILTER.length === 0 || S.SEAT_GRADE_FILTER.some(kw => sgn.includes(kw));
+        const matchExc  = S.SEAT_GRADE_EXCLUDE.length === 0 || !S.SEAT_GRADE_EXCLUDE.some(kw => sgn.includes(kw));
+        const matchSold = !S.HIDE_SOLD_OUT || rc > 0;
         const visible   = matchInc && matchExc && matchSold;
 
         a.style.display = visible ? '' : 'none';
@@ -158,7 +299,7 @@
       });
 
       log(`등급 필터: 표시 ${shown} / 포함안됨 ${hiddenByInc} / 제외매칭 ${hiddenByExc} / 매진 ${hiddenBySold}`, {
-        include: SEAT_GRADE_FILTER, exclude: SEAT_GRADE_EXCLUDE
+        include: S.SEAT_GRADE_FILTER, exclude: S.SEAT_GRADE_EXCLUDE
       });
     };
 
@@ -181,9 +322,9 @@
       'border-radius:0 0 8px 8px', 'box-shadow:0 2px 10px rgba(0,0,0,.3)'
     ].join(';');
     const parts = [];
-    if (SEAT_GRADE_FILTER.length)  parts.push(`포함: ${SEAT_GRADE_FILTER.join(',')}`);
-    if (SEAT_GRADE_EXCLUDE.length) parts.push(`제외: ${SEAT_GRADE_EXCLUDE.join(',')}`);
-    if (HIDE_SOLD_OUT)             parts.push('매진숨김');
+    if (S.SEAT_GRADE_FILTER.length)  parts.push(`포함: ${S.SEAT_GRADE_FILTER.join(',')}`);
+    if (S.SEAT_GRADE_EXCLUDE.length) parts.push(`제외: ${S.SEAT_GRADE_EXCLUDE.join(',')}`);
+    if (S.HIDE_SOLD_OUT)             parts.push('매진숨김');
     banner.textContent = parts.length ? `🔎 등급 필터 · ${parts.join(' · ')}` : '🔎 등급 필터 비활성';
     document.body.appendChild(banner);
     setTimeout(() => banner.remove(), 3000);
@@ -355,12 +496,12 @@
       const avail = allSeats().filter(isAvailable).length;
       const sel   = allSeats().filter(isSelected).length;
       hud.innerHTML = [
-        `<div style="color:#fff;font-size:11px;margin-bottom:4px">🏟 좌석 보조 · ${TICKET_COUNT}매</div>`,
+        `<div style="color:#fff;font-size:11px;margin-bottom:4px">🏟 좌석 보조 · ${S.TICKET_COUNT}매</div>`,
         `<div>전체 ${total} / 가능 ${avail} / 선택 ${sel}</div>`,
         `<div style="margin-top:10px;font-size:11px;color:#888;line-height:1.7">`,
-        `[Q] 임의 ${TICKET_COUNT}매 연속<br>`,
+        `[Q] 임의 ${S.TICKET_COUNT}매 연속<br>`,
         `[E] Hover클릭 ${hoverClickOn ? 'ON' : 'off'}<br>`,
-        `[클릭] 연속 ${TICKET_COUNT}매 자동<br>`,
+        `[클릭] 연속 ${S.TICKET_COUNT}매 자동<br>`,
         `[Enter] 다음/확인`,
         `</div>`,
       ].join('');
@@ -377,8 +518,8 @@
       return ok;
     };
 
-    // 선호도 스코어링 (SEAT_PREFERENCE 기반)
-    const prefActive = SEAT_PREFERENCE.blocks.length + SEAT_PREFERENCE.rows.length + SEAT_PREFERENCE.columns.length > 0;
+    // 선호도 스코어링 (S.SEAT_PREFERENCE 기반)
+    const prefActive = S.SEAT_PREFERENCE.blocks.length + S.SEAT_PREFERENCE.rows.length + S.SEAT_PREFERENCE.columns.length > 0;
     const scoreSeat = (seat) => {
       const sid = seatSID(seat);
       const ov  = sid ? overlayOfSID(sid) : null;
@@ -393,9 +534,9 @@
         const i = list.findIndex(x => String(x) === strVal);
         return i >= 0 ? base * (list.length - i) : 0;
       };
-      return rank(SEAT_PREFERENCE.blocks,  blk, 10000)
-           + rank(SEAT_PREFERENCE.rows,    ri,    100)
-           + rank(SEAT_PREFERENCE.columns, ci,      1);
+      return rank(S.SEAT_PREFERENCE.blocks,  blk, 10000)
+           + rank(S.SEAT_PREFERENCE.rows,    ri,    100)
+           + rank(S.SEAT_PREFERENCE.columns, ci,      1);
     };
 
     // 선호 좌석 하이라이트 (주기적 갱신 — 매진/선택 상태 변화 반영)
@@ -419,8 +560,8 @@
           .map(x => x.s);
       }
       for (const s of candidates) {
-        const group = findCompanions(s, TICKET_COUNT);
-        if (group.length >= TICKET_COUNT) {
+        const group = findCompanions(s, S.TICKET_COUNT);
+        if (group.length >= S.TICKET_COUNT) {
           selectGroup(group);
           const tag = prefActive ? ` (score=${scoreSeat(s)})` : '';
           log(`✅ ${group.length}매 선택${tag}: ${group.map(x => x.getAttribute('title') || x.getAttribute('seatinfo') || '').join(' | ')}`);
@@ -440,13 +581,13 @@
       const my = ++clickToken;
       setTimeout(() => {
         if (my !== clickToken) return;
-        if (TICKET_COUNT <= 1) return;
+        if (S.TICKET_COUNT <= 1) return;
         const selectedNow = allSeats().filter(isSelected);
         if (selectedNow.length !== 1) return;
         if (!isSelected(seat)) return;
-        const group = findCompanions(seat, TICKET_COUNT);
-        if (group.length < TICKET_COUNT) {
-          warn(`같은 행에 ${TICKET_COUNT}칸 연속 없음 (단일 유지)`);
+        const group = findCompanions(seat, S.TICKET_COUNT);
+        if (group.length < S.TICKET_COUNT) {
+          warn(`같은 행에 ${S.TICKET_COUNT}칸 연속 없음 (단일 유지)`);
           return;
         }
         selectGroup(group);
@@ -459,11 +600,11 @@
       const seat = e.target?.closest?.('img.stySeat');
       if (!seat) return;
       if (hoverClickOn && isAvailable(seat)) { clickSeat(seat); return; }
-      if (TICKET_COUNT < 2) return;
+      if (S.TICKET_COUNT < 2) return;
       if (!isAvailable(seat)) return;
       if (allSeats().some(isSelected)) return;
-      const group = findCompanions(seat, TICKET_COUNT);
-      if (group.length >= TICKET_COUNT) {
+      const group = findCompanions(seat, S.TICKET_COUNT);
+      if (group.length >= S.TICKET_COUNT) {
         allSeats().forEach(s => s.removeAttribute('data-preview'));
         group.forEach(s => s.setAttribute('data-preview', '1'));
       }
@@ -482,7 +623,7 @@
       else if (k === 'e') { e.preventDefault(); hoverClickOn = !hoverClickOn; log(`hover-click: ${hoverClickOn}`); }
     });
 
-    log(`좌석 보조 활성화 · 매수=${TICKET_COUNT}`);
+    log(`좌석 보조 활성화 · 매수=${S.TICKET_COUNT}`);
   }
 
   // =========================================================
