@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.11
+// @version      2.0.12
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -115,7 +115,19 @@
     try {
       sessionStorage.removeItem('nol_tried_grades');
       sessionStorage.removeItem('nol_auto_flow_exhausted');
+      sessionStorage.removeItem('nol_auto_grade_clicked');
     } catch (_) {}
+  };
+
+  // 등급 클릭 완료 여부 — sessionStorage 로 프레임/페이지간 공유
+  // (window 플래그만 쓰면 iframe 이나 페이지 navigation 시 동기 안됨)
+  const isGradeClicked = () => {
+    if (window.__auto_grade_clicked__) return true;
+    try { return sessionStorage.getItem('nol_auto_grade_clicked') === '1'; } catch (_) { return false; }
+  };
+  const markGradeClicked = () => {
+    window.__auto_grade_clicked__ = true;
+    try { sessionStorage.setItem('nol_auto_grade_clicked', '1'); } catch (_) {}
   };
 
   const whenCaptchaResolved = (cb, timeoutMs = 10 * 60 * 1000) => {
@@ -450,9 +462,14 @@
     if (!captchaActive()) return;
     captchaIniting = true;
     try {
-      await bookNoticeReady;                            // Phase 1 완료 대기
+      // Phase 1 완료 대기 (예매안내 닫기까지)
+      await bookNoticeReady;
+      // CAPTCHA.js 완전 로드 확인 (fnCheck 정의됨) — jsonCallback race 방지
+      await waitUntil(() => typeof window.fnCheck === 'function', 5000);
+      // 추가 안전 마진
+      await wait(300);
       if (captchaInited) return;
-      if (!captchaActive()) return;                     // 대기 중에 overlay 닫혔으면 skip
+      if (!captchaActive()) return;
       const img   = findCaptchaImg();
       const input = findCaptchaInput();
       if (!img && !input) return;
@@ -538,11 +555,11 @@
 
     // AUTO_FLOW — CAPTCHA 통과 후 SEAT_PROFILES 우선순위대로 등급 자동 클릭
     // (좌석맵 backtrack 으로 돌아온 경우 nol_tried_grades 에 기록된 등급 제외)
-    if (S.AUTO_FLOW && !window.__auto_grade_clicked__ && !isAutoFlowExhausted()) {
+    if (S.AUTO_FLOW && !isGradeClicked() && !isAutoFlowExhausted()) {
       whenCaptchaResolved(() => {
-        if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
+        if (isGradeClicked() || isAutoFlowExhausted()) return;
         const autoPickGrade = () => {
-          if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
+          if (isGradeClicked() || isAutoFlowExhausted()) return;
           const triedGrades = (() => {
             try { return JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); }
             catch (_) { return []; }
@@ -583,7 +600,7 @@
             return;
           }
 
-          window.__auto_grade_clicked__ = true;
+          markGradeClicked();
           const tag = matchedProfile
             ? ` [profile: grade="${matchedProfile.grade || '(any)'}"]`
             : '';
@@ -609,14 +626,15 @@
         if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
         attempts++;
 
-        // ★ 반드시 등급 auto-click 완료된 뒤에만 진행 (같은 페이지 공존 구조 대응)
-        if (!window.__auto_grade_clicked__) {
+        // ★ 등급 리스트가 현재 페이지에 있으면 grade click 완료될 때까지 대기
+        //   없으면 이미 통과한 뒤(다음 페이지) 로 간주하고 바로 진행
+        const gradeListOnPage = !!document.querySelector('div.list a[sgn]');
+        if (gradeListOnPage && !isGradeClicked()) {
           if (attempts < 100) setTimeout(tryClick, 150);
           else warn('[AUTO] 등급 자동선택이 안 돼서 좌석선택 단계 진입 못함');
           return;
         }
 
-        // 등급 클릭 후에도 Interpark JS 가 DOM 업데이트 시간 필요
         const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
         if (!btn || btn.offsetParent === null) {
           if (attempts < 100) setTimeout(tryClick, 150);
@@ -625,10 +643,9 @@
         }
 
         window.__auto_seatchoice_done__ = true;
-        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
+        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회, gradeListOnPage=${gradeListOnPage})`);
         btn.click();
       };
-      // 초기 지연 제거 — 플래그 기반 대기로 충분
       tryClick();
     });
   }
