@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.6
+// @version      2.1.7
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -551,26 +551,66 @@
   });
 
   // =========================================================
-  // 공통: 예매안내 팝업 자동 닫기 — 페이지당 1회만 (Interpark flow 와 race 방지)
+  // 공통: 예매안내 팝업 자동 닫기 — 페이지당 1회만
+  //
+  // 즉시 click 하면 인터파크 초기 capchaInit 의 JSONP 가 아직 in-flight 인
+  // 상태에서 fnBookNoticeShowHide → 두번째 capchaInit 이 race 를 일으켜
+  // "jsonCallback is not a function" 발생 (수동 클릭 시엔 사용자가 1~2초 뒤
+  // 누르므로 race 없음). 자동닫기에도 인간적 지연 부여.
+  //
+  // 조건: 다음 중 먼저 만족되는 쪽에서 click
+  //   A. CAPTCHA 이미지 로드 완료 (첫 JSONP 사이클 끝난 신호)
+  //   B. 1.5s 경과 (CAPTCHA 없는 페이지 대비)
   // =========================================================
-  let bookNoticeHandled = false;
-  const dismissBookNotice = () => {
+  let bookNoticeHandled  = false;
+  let bookNoticeArmed    = false;   // 감지 후 대기 시작 여부
+  const captchaImgLoaded = () => {
+    const img = document.querySelector(
+      'img[id*="captcha" i], img[src*="captcha" i], img[src*="Captcha"], img[src*="IPCaptcha"]'
+    );
+    return !!(img && img.src && img.complete && img.naturalWidth > 0);
+  };
+  const doClickCloseBtn = () => {
     if (bookNoticeHandled) return;
     const layer = document.getElementById('divBookNoticeLayer');
-    if (!layer) return;
-    if (layer.offsetParent === null) return;
+    if (!layer || layer.offsetParent === null) return;
     const close = layer.querySelector('.closeBtn');
     if (!close) return;
     bookNoticeHandled = true;
     close.click();
-    log('예매안내 팝업 자동 닫힘 (1회 처리)');
+    log('예매안내 팝업 자동 닫힘');
   };
-  dismissBookNotice();
+  const armBookNoticeAutoClose = () => {
+    if (bookNoticeArmed || bookNoticeHandled) return;
+    const layer = document.getElementById('divBookNoticeLayer');
+    if (!layer || layer.offsetParent === null) return;
+    bookNoticeArmed = true;
+    log('[HELPER] 예매안내 팝업 감지 → CAPTCHA 초기화 대기 중 (최대 1.5s)');
+
+    const started = Date.now();
+    const MAX_WAIT = 1500;
+    const tick = () => {
+      if (bookNoticeHandled) return;
+      if (captchaImgLoaded()) {
+        log('[HELPER] CAPTCHA 이미지 로드 확인 → 즉시 자동닫기');
+        doClickCloseBtn();
+        return;
+      }
+      if (Date.now() - started >= MAX_WAIT) {
+        log(`[HELPER] ${MAX_WAIT}ms 경과 → 자동닫기 진행 (CAPTCHA 이미지 감지 안 됨)`);
+        doClickCloseBtn();
+        return;
+      }
+      setTimeout(tick, 150);
+    };
+    tick();
+  };
+
+  armBookNoticeAutoClose();
   try {
-    // childList 추가만 감시 (style/class 변화마다 fire 되지 않음 → 훨씬 조용)
     const bn = new MutationObserver(() => {
       if (bookNoticeHandled) { bn.disconnect(); return; }
-      dismissBookNotice();
+      armBookNoticeAutoClose();
     });
     bn.observe(document.body || document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
