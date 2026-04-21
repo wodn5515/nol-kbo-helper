@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.7
+// @version      2.1.8
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -643,6 +643,11 @@
     if (document.querySelector('#divSeatZoom, #divSeatArea, #SeatImg')) return true;
     return false;
   };
+  // 좌석 렌더 대기는 거의 없게 — 좌석 0개면 해당 등급에 실제 좌석 없는 것이므로
+  // 즉시 backtrack. fnInit 이 AJAX 로 늦게 주입하는 케이스 대비 최소한의 재시도만.
+  // (총 대기 < 500ms 목표)
+  const SEATMAP_MAX_TRIES  = 2;   // 2 회 × 150ms = 300ms 추가 대기
+  const SEATMAP_RETRY_INT  = 150;
   let seatMapTries = 0;
   const tryInitSeatMap = () => {
     if (document.querySelector('img.stySeat')) {
@@ -650,26 +655,24 @@
       initSeatMap();
       return;
     }
-    if (!isSeatMapPage()) return;                    // seat map 페이지가 아님 (다른 페이지)
+    if (!isSeatMapPage()) return;                    // seat map 페이지가 아님
 
-    // seat map 페이지인데 좌석이 0개 — fnInit 지연 가능성, 재시도
     seatMapTries++;
     if (seatMapTries === 1) {
-      log(`[AUTO/좌석맵] seat map 페이지 감지 but img.stySeat=0 — 렌더 대기 시작`);
+      log(`[AUTO/좌석맵] seat map 페이지 감지 but img.stySeat=0 — 짧게 ${SEATMAP_MAX_TRIES}×${SEATMAP_RETRY_INT}ms 만 대기`);
     }
-    if (seatMapTries < 20) {
-      if (seatMapTries % 5 === 0) log(`[AUTO/좌석맵] 좌석 렌더 대기... (${seatMapTries}/20)`);
-      setTimeout(tryInitSeatMap, 300);
+    if (seatMapTries <= SEATMAP_MAX_TRIES) {
+      setTimeout(tryInitSeatMap, SEATMAP_RETRY_INT);
       return;
     }
-    // 6초 기다려도 좌석 0개 → 해당 등급은 실제로 좌석이 없음 → backtrack
-    warn(`[AUTO/좌석맵] 좌석 0개 확정 (${seatMapTries}회 × 300ms 대기 후) — 빈 좌석맵으로 간주`);
+    // 짧은 대기 후에도 여전히 0개 → 즉시 backtrack
+    warn(`[AUTO/좌석맵] 좌석 0개 확정 (${seatMapTries-1}회 × ${SEATMAP_RETRY_INT}ms 대기 후) — 즉시 이전단계`);
     if (S.AUTO_FLOW && !isAutoFlowExhausted()) {
       triggerBacktrack('좌석맵 빈 페이지 (seat=0)');
     }
   };
-  // load 후 300ms 추가 지연 — fnInit 내부의 AJAX 나 지연 초기화까지 완료 대기
-  const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 300);
+  // load 후 150ms 지연 — fnInit 이 synchronous 하게 주입하는 경우 대응, 짧게
+  const scheduleSeatMapInit = () => setTimeout(tryInitSeatMap, 150);
   if (document.readyState === 'complete') scheduleSeatMapInit();
   else window.addEventListener('load', scheduleSeatMapInit, { once: true });
 
