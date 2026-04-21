@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.8
+// @version      1.1.9
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -302,6 +302,14 @@
   if (document.querySelector('div.list a[sgn]')) initGradeList();
 
   // =========================================================
+  // 모드 1.5: 자동배정/좌석선택 분기 페이지 (AUTO_FLOW 전용)
+  // — 등급 클릭 후 뜨는 중간 선택 화면에서 "좌석선택" 쪽만 자동 클릭
+  // =========================================================
+  if (S.AUTO_FLOW && document.querySelector('a[onclick*="KBOGate.SetSeat()"]')) {
+    autoClickSeatChoice();
+  }
+
+  // =========================================================
   // 모드 2: 좌석맵 (img.stySeat)
   // =========================================================
   if (document.querySelector('img.stySeat')) initSeatMap();
@@ -406,6 +414,31 @@
       // 필터/렌더 안정화 후 선택 (약간의 랜덤 지연 — 기계적 패턴 완화)
       setTimeout(autoPickGrade, 400 + Math.floor(Math.random() * 200));
     }
+  }
+
+  // =========================================================
+  // 자동배정/좌석선택 분기 페이지 — 좌석선택 버튼 자동 클릭
+  // (KBOGate.SetSeatAuto 는 서버 랜덤배정이라 스킵, KBOGate.SetSeat 만 사용)
+  // =========================================================
+  function autoClickSeatChoice() {
+    if (window.__auto_seatchoice_done__) return;
+    let attempts = 0;
+    const tryClick = () => {
+      if (window.__auto_seatchoice_done__) return;
+      attempts++;
+      const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
+      if (btn && btn.offsetParent !== null) {
+        window.__auto_seatchoice_done__ = true;
+        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
+        btn.click();
+        // 일부 브라우저/ie-legacy 대응: onclick 직접 실행 fallback
+        try { (0, eval)(btn.getAttribute('onclick') || ''); } catch (_) {}
+        return;
+      }
+      if (attempts < 25) setTimeout(tryClick, 200);
+      else warn('[AUTO] 좌석선택 버튼 못 찾음 — 수동 진행');
+    };
+    setTimeout(tryClick, 400 + Math.floor(Math.random() * 200));
   }
 
   // =========================================================
