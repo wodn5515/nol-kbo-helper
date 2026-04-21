@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.13
+// @version      2.1.14
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://ticket.interpark.com/*
@@ -1450,22 +1450,15 @@
 
       whenCaptchaResolved(async () => {
         if (window.__auto_seat_done__ || isAutoFlowBlocked()) return;
-        // 좌석 렌더 대기 — TICKET_COUNT 만큼만 나타나면 즉시 진행.
-        // (기존 하드코딩 < 3 이 TICKET_COUNT=1 인데 가용 1~2개일 때 3번째가 영영 안 와
-        //  4.5s 낭비하던 버그 수정. 또한 0개일 경우 최대 대기도 2.25s 로 단축)
-        const threshold = Math.max(1, S.TICKET_COUNT || 1);
-        let attempt = 0;
-        while (attempt < 15 && allSeats().filter(isAvailable).length < threshold) {
-          await wait(150);
-          attempt++;
-        }
+        // tryInitSeatMap 이 이미 img.stySeat 존재 확인 후 initSeatMap 호출 →
+        // 좌석 렌더 대기 불필요. 즉시 autoPick.
         const availableCount = allSeats().filter(isAvailable).length;
         if (availableCount === 0) {
-          warn(`[AUTO] 빈자리 없음 — 등급 rc 와 실제 좌석 불일치 (${attempt*150}ms 대기 후)`);
+          warn('[AUTO] 빈자리 없음 — 등급 rc 와 실제 좌석 불일치');
           await doBacktrack('빈자리 없음');
           return;
         }
-        log(`[AUTO] 좌석 로드 감지 (avail=${availableCount}, ${attempt*150}ms) → autoPick`);
+        log(`[AUTO] 좌석 ${allSeats().length}개 · 가용 ${availableCount} → autoPick`);
 
         // autoPick 내부에서 좌석들을 50ms 간격으로 순차 클릭
         const picked = await autoPick();
