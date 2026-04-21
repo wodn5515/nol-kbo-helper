@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.0
+// @version      2.1.1
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -93,13 +93,27 @@
   // (인터파크 CAPTCHA 는 등급/좌석 위에 overlay 로 뜨기 때문에, 단순히
   //  div.list/img.stySeat 존재 여부만 체크하면 premature 하게 자동선택됨)
   // =========================================================
-  const captchaActive = () => {
-    const layer = document.getElementById('divRecaptcha') || document.querySelector('.capchaLayer');
-    if (!layer) return false;
-    if (layer.offsetParent === null) return false;        // 숨김(display:none 등)
-    const cs = getComputedStyle(layer);
+  const isVisible = (el) => {
+    if (!el) return false;
+    if (el.offsetParent === null) return false;
+    const cs = getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') return false;
     return true;
+  };
+  const captchaActive = () => {
+    // 1차: 오버레이 layer visibility
+    const layer = document.getElementById('divRecaptcha') || document.querySelector('.capchaLayer');
+    if (isVisible(layer)) return true;
+    // 2차 fallback — CAPTCHA.js 초기화 타이밍이나 JSONP 실패로 layer class/visibility 가
+    // 일시적으로 꼬여도 input/이미지가 살아있으면 CAPTCHA 입력 단계임
+    const input = document.getElementById('txtCaptcha') ||
+                  document.querySelector('input[id*="captcha" i], input[name*="captcha" i]');
+    if (isVisible(input)) return true;
+    const img = document.querySelector(
+      'img[id*="captcha" i], img[src*="captcha" i], img[src*="Captcha"], img[src*="IPCaptcha"]'
+    );
+    if (isVisible(img)) return true;
+    return false;
   };
 
   // AUTO_FLOW 소진 플래그 — 팝업 창 session 단위
@@ -117,21 +131,63 @@
     } catch (_) {}
   };
 
+  // whenCaptchaResolved — 2-phase gate
+  // phase A (looking): 호출 시점에 CAPTCHA 가 아직 active 가 아닐 수 있음
+  //                    (CAPTCHA.js 가 늦게 init 되거나 JSONP 실패로 layer 뒤늦게 visible).
+  //                    최대 APPEAR_TIMEOUT ms 동안 등장 감시. 등장하면 phase B 로.
+  //                    안 뜨면 "진짜 CAPTCHA 없음" 으로 보고 cb().
+  // phase B (waiting): 사용자가 CAPTCHA 풀 때까지 대기.
+  //                    단, layer visibility 가 transient 하게 깜빡일 수 있으니
+  //                    연속으로 STABLE_MS 동안 inactive 여야 cb().
   const whenCaptchaResolved = (cb, timeoutMs = 10 * 60 * 1000) => {
-    if (!captchaActive()) { cb(); return; }
-    log('[AUTO] CAPTCHA 입력 대기 중...');
-    const obs = new MutationObserver(() => {
-      if (!captchaActive()) {
-        obs.disconnect();
-        log('[AUTO] CAPTCHA 통과 감지 → 자동 진행');
-        cb();
+    const APPEAR_TIMEOUT = 4000;  // CAPTCHA 등장 기다리는 최대 시간
+    const STABLE_MS      = 500;   // inactive 가 이 시간만큼 연속되어야 resolved 인정
+    let phase = captchaActive() ? 'waiting' : 'looking';
+    let inactiveSince = 0;
+    let fired = false;
+    const startedAt = Date.now();
+
+    if (phase === 'looking') log('[AUTO] CAPTCHA 등장 대기 (최대 ' + (APPEAR_TIMEOUT/1000) + 's)...');
+    else                     log('[AUTO] CAPTCHA 입력 대기 중...');
+
+    const fire = (reason) => {
+      if (fired) return;
+      fired = true;
+      try { obs.disconnect(); } catch (_) {}
+      clearInterval(intv);
+      clearTimeout(tmo);
+      log('[AUTO] CAPTCHA 게이트 해제 — ' + reason);
+      cb();
+    };
+
+    const tick = () => {
+      if (fired) return;
+      const active = captchaActive();
+      if (phase === 'looking') {
+        if (active) {
+          phase = 'waiting';
+          log('[AUTO] CAPTCHA 등장 감지 → 입력 대기 중...');
+          return;
+        }
+        if (Date.now() - startedAt > APPEAR_TIMEOUT) {
+          fire('CAPTCHA 미등장');
+        }
+        return;
       }
-    });
+      // phase === 'waiting'
+      if (active) { inactiveSince = 0; return; }
+      if (!inactiveSince) inactiveSince = Date.now();
+      if (Date.now() - inactiveSince >= STABLE_MS) fire('통과 감지');
+    };
+
+    const obs = new MutationObserver(tick);
     obs.observe(document.documentElement, {
       childList: true, subtree: true,
       attributes: true, attributeFilter: ['style', 'class']
     });
-    setTimeout(() => obs.disconnect(), timeoutMs);
+    // attribute/childList 변화 없이 조용히 해제되는 케이스 대비 폴링 백업
+    const intv = setInterval(tick, 250);
+    const tmo  = setTimeout(() => { if (!fired) fire('timeout'); }, timeoutMs);
   };
 
   // =========================================================
