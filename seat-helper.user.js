@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.11
+// @version      2.1.12
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://ticket.interpark.com/*
@@ -706,12 +706,11 @@
   // 좌석 렌더 대기 — MutationObserver 로 img.stySeat 등장 즉시 감지.
   // 하드 타임아웃 SEATMAP_MAX_WAIT_MS. 그 전에 나타나면 언제든 catch.
   //
-  // ★ 타임아웃 시: 다른 프레임에도 좌석 없는지 실측 후 판단.
-  //   (iframe 기반 seat map 이 @match 에 안 걸려 우리 스크립트가 안 뜨는
-  //    케이스, 또는 seat map 이 부모 프레임에 있는 케이스 대비)
-  //   다른 프레임에서 좌석 발견 시 backtrack 스킵 — 그 프레임의 다른 스크립트
-  //   인스턴스가 처리할 것.
-  const SEATMAP_MAX_WAIT_MS = 5000;
+  // 두산 구조: BookSeat.asp (wrapper) → BookSeatDetail.asp (iframe, 실제 좌석)
+  // 우리 스크립트는 @all-frames 로 둘 다 주입됨.
+  // - BookSeatDetail 쪽에선 img.stySeat 있음 → 즉시 initSeatMap → autoPick OK
+  // - BookSeat (wrapper) 쪽에선 좌석 없음 → 자식 frame 검사로 wrapper 판정 → skip
+  const SEATMAP_MAX_WAIT_MS = 3500;
 
   // 현재 프레임 + 접근 가능한 모든 parent/child 프레임에서 img.stySeat 탐색
   const scanSeatsAcrossFrames = () => {
@@ -737,6 +736,18 @@
     return results;
   };
 
+  // 자식 frame 에 좌석 있는지 (wrapper frame 판정용)
+  const childFrameHasSeats = () => {
+    try {
+      for (let i = 0; i < window.frames.length; i++) {
+        try {
+          if (window.frames[i].document.querySelector('img.stySeat')) return true;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return false;
+  };
+
   let seatMapSettled = false;
   const tryInitSeatMap = () => {
     if (seatMapSettled) return;
@@ -747,6 +758,14 @@
       return;
     }
     if (!isSeatMapPage()) return;                    // seat map 페이지가 아님
+
+    // ★ wrapper frame 즉시 감지 — 자식 iframe 에 이미 좌석 있으면 이 frame 은
+    //   wrapper 이므로 아무것도 안 함. 5s 헛된 대기 제거.
+    if (childFrameHasSeats()) {
+      seatMapSettled = true;
+      log(`[AUTO/좌석맵] 자식 frame 에 좌석 있음 — 이 frame 은 wrapper, skip (url=${location.pathname})`);
+      return;
+    }
 
     log(`[AUTO/좌석맵] seat map 페이지 감지 but img.stySeat=0 — MutationObserver 대기 (max ${SEATMAP_MAX_WAIT_MS}ms) · url=${location.href}`);
     const startedAt = Date.now();
@@ -785,10 +804,20 @@
     obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
     const tmo = setTimeout(() => finalize('timeout'), SEATMAP_MAX_WAIT_MS);
 
-    // 진행 로그 — 500ms 마다 현재 상태 출력. 두산처럼 AJAX 가 느린 경우
-    // 언제 seats/ImgSeatCount 가 나타나는지 확인용.
+    // 진행 로그 + 자식 frame 좌석 감지 (wrapper 늦게 판정되는 경우)
+    // 500ms 간격으로 상태 확인. 대기 도중 자식 frame 에 좌석이 나타나면
+    // 이 frame 은 wrapper 로 판정하고 조기 종료.
     const progressTicker = setInterval(() => {
       if (seatMapSettled) { clearInterval(progressTicker); return; }
+      // 자식 frame 에 좌석 생겼으면 wrapper 확정 → 대기 중단
+      if (childFrameHasSeats()) {
+        seatMapSettled = true;
+        try { obs.disconnect(); } catch (_) {}
+        clearTimeout(tmo);
+        clearInterval(progressTicker);
+        log(`[AUTO/좌석맵] 대기 중 자식 frame 좌석 감지 — wrapper 판정, skip (${Date.now()-startedAt}ms)`);
+        return;
+      }
       const elapsed = Date.now() - startedAt;
       const seats   = document.querySelectorAll('img.stySeat').length;
       const isc     = document.getElementById('ImgSeatCount');
