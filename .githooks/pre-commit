@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# staged *.user.js 파일의 @version (patch) 자동 증가
+# 예: 1.1.0 → 1.1.1
+#
+# 설치: git config core.hooksPath .githooks
+# 우회: git commit --no-verify
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.user\.js$' || true)
+[ -z "$staged" ] && exit 0
+
+bumped=0
+for file in $staged; do
+  current=$(grep -m1 '^// @version' "$file" | awk '{print $3}')
+  if [ -z "$current" ]; then
+    echo "⚠️  $file: @version 헤더 없음, 건너뜀" >&2
+    continue
+  fi
+
+  IFS='.' read -r major minor patch <<< "$current"
+  if ! [[ "$patch" =~ ^[0-9]+$ ]]; then
+    echo "⚠️  $file: 버전 형식 오류 ($current), 건너뜀" >&2
+    continue
+  fi
+  new_patch=$((patch + 1))
+  new_version="$major.$minor.$new_patch"
+
+  # macOS/Linux 호환 (perl 사용)
+  perl -i -pe "s|^(// \@version\s+).*|\${1}$new_version|" "$file"
+  git add "$file"
+  echo "  ⬆  $file: $current → $new_version"
+  bumped=$((bumped + 1))
+done
+
+if [ "$bumped" -gt 0 ]; then
+  echo "✅ pre-commit: $bumped 개 파일 버전 증가"
+fi
+
+exit 0
