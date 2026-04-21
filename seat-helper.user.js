@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.12
+// @version      2.0.13
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -405,14 +405,17 @@
     close.click();
     log('예매안내 팝업 자동 닫기 완료');
   };
-  if (S.AUTO_CLOSE_BOOK_NOTICE) {
-    bookNoticeReady = (async () => {
-      await waitLoad();
-      await waitUntil(() => typeof window.fnCheck === 'function' || document.getElementById('imgCaptcha'), 5000);
-      await wait(500);
+  // CAPTCHA.js 로드 대기 (AUTO_CLOSE_BOOK_NOTICE off 여도 CAPTCHA init 은 이걸 기다림)
+  bookNoticeReady = (async () => {
+    await waitLoad();
+    await waitUntil(() => typeof window.fnCheck === 'function', 5000);
+    if (S.AUTO_CLOSE_BOOK_NOTICE) {
+      await wait(150); // 짧은 안정화 margin
       closeBookNotice();
-      await wait(300);  // 닫기 처리 안정화
-    })();
+      await wait(150); // 닫기 반영 margin
+    }
+  })();
+  if (S.AUTO_CLOSE_BOOK_NOTICE) {
     // 페이지 전환 후 재등장 대비 observer backup
     try {
       const bn = new MutationObserver(() => {
@@ -462,12 +465,8 @@
     if (!captchaActive()) return;
     captchaIniting = true;
     try {
-      // Phase 1 완료 대기 (예매안내 닫기까지)
+      // bookNoticeReady 내부에서 이미 waitLoad + fnCheck 대기 + 예매안내 닫기 완료
       await bookNoticeReady;
-      // CAPTCHA.js 완전 로드 확인 (fnCheck 정의됨) — jsonCallback race 방지
-      await waitUntil(() => typeof window.fnCheck === 'function', 5000);
-      // 추가 안전 마진
-      await wait(300);
       if (captchaInited) return;
       if (!captchaActive()) return;
       const img   = findCaptchaImg();
@@ -619,31 +618,28 @@
   // =========================================================
   function autoClickSeatChoice() {
     if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
+
+    // ★ 엄격한 선행 조건: 등급 click 이 같은 popup session 에서 선행돼야만 진행
+    //   (AUTO_FLOW 의 체인 보장 — 독립 진입은 skip)
+    if (!isGradeClicked()) {
+      log('[AUTO] 좌석선택 skip — 등급 click 선행 안됨');
+      return;
+    }
+
     whenCaptchaResolved(() => {
       if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
       let attempts = 0;
       const tryClick = () => {
         if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
         attempts++;
-
-        // ★ 등급 리스트가 현재 페이지에 있으면 grade click 완료될 때까지 대기
-        //   없으면 이미 통과한 뒤(다음 페이지) 로 간주하고 바로 진행
-        const gradeListOnPage = !!document.querySelector('div.list a[sgn]');
-        if (gradeListOnPage && !isGradeClicked()) {
-          if (attempts < 100) setTimeout(tryClick, 150);
-          else warn('[AUTO] 등급 자동선택이 안 돼서 좌석선택 단계 진입 못함');
-          return;
-        }
-
         const btn = document.querySelector('a[onclick*="KBOGate.SetSeat()"]');
         if (!btn || btn.offsetParent === null) {
           if (attempts < 100) setTimeout(tryClick, 150);
           else warn('[AUTO] 좌석선택 버튼 visible 전환 안됨 — 수동 진행');
           return;
         }
-
         window.__auto_seatchoice_done__ = true;
-        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회, gradeListOnPage=${gradeListOnPage})`);
+        log(`[AUTO] 좌석선택 버튼 클릭 (자동배정 스킵, 시도 ${attempts}회)`);
         btn.click();
       };
       tryClick();
