@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.13
+// @version      1.1.14
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -349,10 +349,13 @@
 
   // =========================================================
   // 모드 3: CAPTCHA (동적 감지)
+  // — CAPTCHA 오버레이가 실제로 visible 일 때만 init (input 속성/스타일 수정)
+  //   그렇지 않으면 DOM 무간섭 (등급→좌석 flow 중 서버 validation 방해 방지)
   // =========================================================
   let captchaInited = false;
   const tryInitCaptcha = () => {
     if (captchaInited) return;
+    if (!captchaActive()) return;                     // ★ 오버레이 visible 할 때만 init
     const img   = findCaptchaImg();
     const input = findCaptchaInput();
     if (!img && !input) return;
@@ -361,7 +364,10 @@
   };
   tryInitCaptcha();
   try {
-    new MutationObserver(tryInitCaptcha).observe(document.documentElement, { childList: true, subtree: true });
+    new MutationObserver(tryInitCaptcha).observe(document.documentElement, {
+      childList: true, subtree: true,
+      attributes: true, attributeFilter: ['style', 'class']  // visibility 변화도 감지
+    });
   } catch (_) {}
 
   // =========================================================
