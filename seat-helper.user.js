@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.1
+// @version      2.0.2
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -100,6 +100,21 @@
     const cs = getComputedStyle(layer);
     if (cs.display === 'none' || cs.visibility === 'hidden') return false;
     return true;
+  };
+
+  // AUTO_FLOW 가 한 번 프로필 소진됐으면 같은 popup 창 내에서 재시도 안함.
+  // sessionStorage 에 기록 — 새 popup 창 열리면 자동 리셋 (session 단위)
+  const isAutoFlowExhausted = () => {
+    try { return sessionStorage.getItem('nol_auto_flow_exhausted') === '1'; } catch (_) { return false; }
+  };
+  const markAutoFlowExhausted = () => {
+    try { sessionStorage.setItem('nol_auto_flow_exhausted', '1'); } catch (_) {}
+  };
+  const clearAutoFlowState = () => {
+    try {
+      sessionStorage.removeItem('nol_tried_grades');
+      sessionStorage.removeItem('nol_auto_flow_exhausted');
+    } catch (_) {}
   };
 
   const whenCaptchaResolved = (cb, timeoutMs = 10 * 60 * 1000) => {
@@ -476,11 +491,11 @@
 
     // AUTO_FLOW — CAPTCHA 통과 후 SEAT_PROFILES 우선순위대로 등급 자동 클릭
     // (좌석맵 backtrack 으로 돌아온 경우 nol_tried_grades 에 기록된 등급 제외)
-    if (S.AUTO_FLOW && !window.__auto_grade_clicked__) {
+    if (S.AUTO_FLOW && !window.__auto_grade_clicked__ && !isAutoFlowExhausted()) {
       whenCaptchaResolved(() => {
-        if (window.__auto_grade_clicked__) return;
+        if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
         const autoPickGrade = () => {
-          if (window.__auto_grade_clicked__) return;
+          if (window.__auto_grade_clicked__ || isAutoFlowExhausted()) return;
           const triedGrades = (() => {
             try { return JSON.parse(sessionStorage.getItem('nol_tried_grades') || '[]'); }
             catch (_) { return []; }
@@ -511,8 +526,8 @@
             target = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0) || visible[0];
           }
           if (!target) {
-            warn('[AUTO] 시도 가능한 등급 소진 — 수동 진행 필요');
-            sessionStorage.removeItem('nol_tried_grades');  // 초기화 (다음 재시도용)
+            warn('[AUTO] 시도 가능한 등급 소진 — AUTO_FLOW 중단 (이 창에서 재시도 안함)');
+            markAutoFlowExhausted();
             return;
           }
 
@@ -534,12 +549,12 @@
   // CAPTCHA 오버레이가 같이 떠 있으면 통과할 때까지 대기
   // =========================================================
   function autoClickSeatChoice() {
-    if (window.__auto_seatchoice_done__) return;
+    if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
     whenCaptchaResolved(() => {
-      if (window.__auto_seatchoice_done__) return;
+      if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
       let attempts = 0;
       const tryClick = () => {
-        if (window.__auto_seatchoice_done__) return;
+        if (window.__auto_seatchoice_done__ || isAutoFlowExhausted()) return;
         attempts++;
 
         // ★ 반드시 등급 auto-click 완료된 뒤에만 진행 (같은 페이지 공존 구조 대응)
@@ -918,9 +933,9 @@
 
     // AUTO_FLOW — CAPTCHA 통과 후 좌석 로드 → autoPick → 좌석선택완료
     // 각 단계 사이 50ms 딜레이 (bot 탐지 완화)
-    if (S.AUTO_FLOW && !window.__auto_seat_done__) {
+    if (S.AUTO_FLOW && !window.__auto_seat_done__ && !isAutoFlowExhausted()) {
       whenCaptchaResolved(async () => {
-        if (window.__auto_seat_done__) return;
+        if (window.__auto_seat_done__ || isAutoFlowExhausted()) return;
         // 좌석 렌더 대기
         let attempt = 0;
         while (attempt < 30 && allSeats().filter(isAvailable).length < 3) {
@@ -935,8 +950,9 @@
         const picked = await autoPick();
         if (!picked) {
           // Backtrack: SEAT_PROFILES 가 있으면 이전단계로 돌아가서 다음 프로필 시도
+          // (MAX 제한 없음 — 모든 profile 다 시도하고 소진되면 grade list 에서 감지해서
+          //  markAutoFlowExhausted 호출 → 무한 루프 방지)
           const profiles = S.SEAT_PROFILES || [];
-          const MAX_BACKTRACK = 6;
           if (profiles.length >= 2) {
             // 현재 등급 식별 (좌석 title "[등급명] ...")
             const firstSeat = document.querySelector('img.stySeat[title]');
@@ -949,12 +965,6 @@
             if (currentGrade && !triedGrades.includes(currentGrade)) {
               triedGrades.push(currentGrade);
               sessionStorage.setItem('nol_tried_grades', JSON.stringify(triedGrades));
-            }
-
-            if (triedGrades.length >= MAX_BACKTRACK) {
-              warn(`[AUTO] 최대 ${MAX_BACKTRACK}회 backtrack 도달 — 수동 진행`);
-              sessionStorage.removeItem('nol_tried_grades');
-              return;
             }
 
             log(`[AUTO] "${currentGrade}" 선호 좌석 매칭 실패 → 이전 단계 복귀 (tried=${triedGrades.length})`);
@@ -1002,8 +1012,8 @@
           return;
         }
 
-        // 성공 — tried grades 초기화 (다음 booking 을 위해)
-        sessionStorage.removeItem('nol_tried_grades');
+        // 성공 — AUTO_FLOW 상태 플래그 모두 초기화 (다음 booking 대비)
+        clearAutoFlowState();
 
         // 좌석선택완료 클릭 직전 50ms 딜레이
         await wait(STEP_DELAY_MS);
