@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.20
+// @version      1.1.21
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -39,11 +39,10 @@
     HIDE_SOLD_OUT:      false,     // 잔여석 0 등급 숨김
     CAPTCHA_SCALE:      2,         // (현재 미사용) CAPTCHA 확대 배율
     AUTO_FLOW:          false,     // CAPTCHA 통과 후 등급→좌석→좌석선택완료 자동 진행
-    SEAT_PREFERENCE: {
-      blocks:  [],  // 블럭 번호 (rg "413_4" 앞부분)
-      rows:    [],  // 행 인덱스 ri
-      columns: [],  // 열 인덱스 ci (좌→우 순서)
+    SEAT_PREFERENCE: {             // (fallback) SEAT_PROFILES 비어있을 때 사용
+      blocks:  [],  rows: [],  columns: [],
     },
+    SEAT_PROFILES:      [],        // [{grade, blocks, rows, columns}, ...] 순서대로 시도
   };
   const SETTINGS_KEY = 'nol_kbo_seat_helper_settings';
 
@@ -77,6 +76,7 @@
       ...DEFAULT_SETTINGS,
       ...stored,
       SEAT_PREFERENCE: { ...DEFAULT_SETTINGS.SEAT_PREFERENCE, ...(stored.SEAT_PREFERENCE || {}) },
+      SEAT_PROFILES: Array.isArray(stored.SEAT_PROFILES) ? stored.SEAT_PROFILES : [],
     };
   };
   const S = loadSettings();
@@ -152,6 +152,12 @@
         <input id="${id}" type="checkbox" ${checked ? 'checked' : ''} style="width:16px;height:16px">
         ${label}
       </label>`;
+    const txt = (label, value, id, hint = '', rows = 4) => `
+      <label style="display:block;margin-bottom:14px">
+        <div style="font-size:12px;color:#aaa;margin-bottom:4px">${label}${hint ? ` <span style="color:#666">· ${hint}</span>` : ''}</div>
+        <textarea id="${id}" rows="${rows}"
+          style="width:100%;padding:8px 10px;background:#0d0d0d;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;box-sizing:border-box;font-family:monospace;resize:vertical;line-height:1.4">${value}</textarea>
+      </label>`;
 
     panel.innerHTML = `
       <h2 style="margin:0 0 16px;font-size:18px">⚙️ 예매 보조 설정</h2>
@@ -165,7 +171,14 @@
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
       ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
-      <div style="font-size:13px;color:#aaa;margin-bottom:10px">좌석 선호도 (Q 자동선택 우선순위)</div>
+      <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PROFILES (우선순위 배열 · 매칭된 등급의 blocks/rows/columns 적용)</div>
+      ${txt('SEAT_PROFILES (JSON 배열)',
+        JSON.stringify(S.SEAT_PROFILES || [], null, 2),
+        '__s_profiles__',
+        '예: [{"grade":"테이블","blocks":[101,102],"rows":[1,2]},{"grade":"레드","blocks":[]}]',
+        10)}
+      <hr style="border:0;border-top:1px solid #333;margin:16px 0">
+      <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PREFERENCE (fallback · PROFILES 비어있을 때만 적용)</div>
       ${inp('blocks (블럭 번호)', 'text', (S.SEAT_PREFERENCE.blocks || []).join(', '), '__s_blks__', '예: 413, 412')}
       ${inp('rows (행 ri)', 'text', (S.SEAT_PREFERENCE.rows || []).join(', '), '__s_rows__', '예: 3, 4, 5')}
       ${inp('columns (열 ci)', 'text', (S.SEAT_PREFERENCE.columns || []).join(', '), '__s_cols__', '예: 0, 2, 4, 6')}
@@ -194,6 +207,25 @@
       location.reload();
     };
     $('__s_save__').onclick = () => {
+      // SEAT_PROFILES JSON 파싱 + 검증
+      let profiles = [];
+      const profilesRaw = ($('__s_profiles__').value || '').trim();
+      if (profilesRaw) {
+        try {
+          const parsed = JSON.parse(profilesRaw);
+          if (!Array.isArray(parsed)) throw new Error('배열이 아님');
+          profiles = parsed.map(p => ({
+            grade:   typeof p.grade === 'string' ? p.grade : '',
+            blocks:  Array.isArray(p.blocks)  ? p.blocks  : [],
+            rows:    Array.isArray(p.rows)    ? p.rows    : [],
+            columns: Array.isArray(p.columns) ? p.columns : [],
+          }));
+        } catch (e) {
+          alert(`SEAT_PROFILES JSON 파싱 실패:\n${e.message}\n\n저장 취소됨 — 형식 확인 후 다시 저장해주세요.`);
+          return;
+        }
+      }
+
       const next = {
         TICKET_COUNT:       Math.max(1, parseInt($('__s_ticket__').value, 10) || 1),
         SEAT_GRADE_FILTER:  parseList($('__s_finc__').value, false),
@@ -206,6 +238,7 @@
           rows:    parseList($('__s_rows__').value, true),
           columns: parseList($('__s_cols__').value, true),
         },
+        SEAT_PROFILES: profiles,
       };
       storage.set(next);
       log('설정 저장됨', next);
@@ -441,7 +474,7 @@
     document.body.appendChild(banner);
     setTimeout(() => banner.remove(), 3000);
 
-    // AUTO_FLOW — CAPTCHA 통과 후 잔여석 있는 첫 등급 자동 클릭
+    // AUTO_FLOW — CAPTCHA 통과 후 SEAT_PROFILES 우선순위대로 등급 자동 클릭
     if (S.AUTO_FLOW && !window.__auto_grade_clicked__) {
       whenCaptchaResolved(() => {
         if (window.__auto_grade_clicked__) return;
@@ -449,11 +482,31 @@
           if (window.__auto_grade_clicked__) return;
           const visible = Array.from(list.querySelectorAll('a[sgn]'))
             .filter(a => a.style.display !== 'none' && a.offsetParent !== null);
-          const available = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0);
-          const target = available || visible[0];
+
+          // 프로필 순위로 매칭 시도 (rc>0)
+          let target = null;
+          let matchedProfile = null;
+          const profiles = S.SEAT_PROFILES || [];
+          for (const p of profiles) {
+            const hit = visible.find(a => {
+              const sgn = a.getAttribute('sgn') || '';
+              const rc  = parseInt(a.getAttribute('rc') || '0', 10);
+              if (rc <= 0) return false;
+              return !p.grade || sgn.includes(p.grade);
+            });
+            if (hit) { target = hit; matchedProfile = p; break; }
+          }
+          // 프로필 매칭 없으면 기존 동작 (rc>0 첫 등급)
+          if (!target) {
+            target = visible.find(a => parseInt(a.getAttribute('rc') || '0', 10) > 0) || visible[0];
+          }
           if (!target) { warn('[AUTO] 자동선택 가능한 등급 없음'); return; }
+
           window.__auto_grade_clicked__ = true;
-          log(`[AUTO] 등급 자동선택: ${target.getAttribute('sgn')} (rc=${target.getAttribute('rc')})`);
+          const tag = matchedProfile
+            ? ` [profile: grade="${matchedProfile.grade || '(any)'}"]`
+            : '';
+          log(`[AUTO] 등급 자동선택${tag}: ${target.getAttribute('sgn')} (rc=${target.getAttribute('rc')})`);
           target.click();
         };
         setTimeout(autoPickGrade, 400 + Math.floor(Math.random() * 200));
@@ -504,6 +557,27 @@
   // =========================================================
   function initSeatMap() {
     let hoverClickOn = false;
+
+    // 현재 좌석맵의 등급 감지 (좌석 title: "[등급명] 블럭-좌석")
+    // → SEAT_PROFILES 에서 매칭되는 프로필의 blocks/rows/columns 를 SEAT_PREFERENCE 로 override
+    const profiles = S.SEAT_PROFILES || [];
+    if (profiles.length) {
+      const firstSeat = document.querySelector('img.stySeat[title]');
+      const title = firstSeat?.getAttribute('title') || '';
+      const gradeMatch = title.match(/^\[([^\]]+)\]/);
+      const currentGrade = gradeMatch ? gradeMatch[1] : '';
+      const matched = profiles.find(p => !p.grade || currentGrade.includes(p.grade));
+      if (matched) {
+        S.SEAT_PREFERENCE = {
+          blocks:  matched.blocks  || [],
+          rows:    matched.rows    || [],
+          columns: matched.columns || [],
+        };
+        log(`활성 프로필: grade="${matched.grade || '(any)'}" (현재=${currentGrade})`, S.SEAT_PREFERENCE);
+      } else {
+        log(`SEAT_PROFILES 매칭 없음 (현재="${currentGrade}") — fallback 으로 SEAT_PREFERENCE 사용`);
+      }
+    }
 
     const allSeats = () => Array.from(document.querySelectorAll('img.stySeat'));
     const seatSID  = (s) => {
