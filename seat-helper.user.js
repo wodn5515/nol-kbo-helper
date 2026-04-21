@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.3
+// @version      2.0.4
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://*.interpark.com/*TMGS*
@@ -102,25 +102,13 @@
     return true;
   };
 
-  // AUTO_FLOW 소진 플래그 + TTL (기본 3분)
-  // - 창 살아있는 동안 무한 재시도 루프 방지 (exhaust 상태 유지)
-  // - TTL 만료 시 자동 리셋 → 새로고침이나 충분한 시간 후 재시도 가능
-  // - 새 popup 창 열면 sessionStorage 자연 초기화됨
-  const EXHAUSTED_TTL_MS = 3 * 60 * 1000;
+  // AUTO_FLOW 소진 플래그 — 팝업 창 session 단위
+  // (팝업 닫고 새 팝업 열면 sessionStorage 자연 초기화 → AUTO_FLOW 재시도 가능)
   const isAutoFlowExhausted = () => {
-    try {
-      const ts = parseInt(sessionStorage.getItem('nol_auto_flow_exhausted') || '0', 10);
-      if (!ts) return false;
-      if (Date.now() - ts > EXHAUSTED_TTL_MS) {
-        clearAutoFlowState();
-        log(`[AUTO] exhaustion TTL 만료 (${EXHAUSTED_TTL_MS/1000}s) — AUTO_FLOW 재활성화`);
-        return false;
-      }
-      return true;
-    } catch (_) { return false; }
+    try { return sessionStorage.getItem('nol_auto_flow_exhausted') === '1'; } catch (_) { return false; }
   };
   const markAutoFlowExhausted = () => {
-    try { sessionStorage.setItem('nol_auto_flow_exhausted', String(Date.now())); } catch (_) {}
+    try { sessionStorage.setItem('nol_auto_flow_exhausted', '1'); } catch (_) {}
   };
   const clearAutoFlowState = () => {
     try {
