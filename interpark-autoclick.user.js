@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 자동화
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      1.1.1
+// @version      1.1.2
 // @description  인터파크 KBO 구단 페이지 — 오픈 시각 자동 감지 후 예매 버튼 고속 클릭
 // @match        https://ticket.interpark.com/Contents/Sports/GoodsInfo*
 // @run-at       document-end
@@ -21,7 +21,8 @@
 // ▶ 전략
 //   POST /Contents/Sports/GoodsInfoList 직통 호출 → .timeSchedule 파싱 →
 //   판매예정 텍스트("MM월 DD일 HH시 오픈")에서 오픈 시각 자동 추출 →
-//   T-2s 100ms / T-1s 50ms 2단 폴링 → Y 플립 순간 onclick 직접 eval
+//   T-2s 부터 간격 0ms 순차 폴링 (inflight 가드로 직전 응답 완료 후 즉시 다음
+//   요청, RTT 가 자연 간격) → Y 플립 순간 onclick 직접 eval
 // ============================================================
 
 (() => {
