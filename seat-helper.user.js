@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.17
+// @version      2.2.0
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://ticket.interpark.com/*
@@ -45,6 +45,10 @@
       blocks:  [],  rows: [],  columns: [],
     },
     SEAT_PROFILES:      [],        // [{grade, blocks, rows, columns}, ...] 순서대로 시도
+    // 취소표 헌팅 모드 — 좌석맵에서 선호 매칭 실패 시 backtrack 대신 reload 반복
+    HUNT_MODE:              false,   // true = 좌석맵 새로고침 반복
+    HUNT_RELOAD_INTERVAL_MS: 2500,   // reload 간격 (너무 짧으면 서버가 차단)
+    HUNT_WEBHOOK_URL:       '',      // 좌석 잡힘 시 POST 할 URL (비워두면 비활성)
   };
   const SETTINGS_KEY = 'nol_kbo_seat_helper_settings';
 
@@ -218,6 +222,108 @@
       sessionStorage.removeItem('nol_captcha_passed');
     } catch (_) {}
   };
+
+  // =========================================================
+  // HUNT_MODE — 취소표 헌팅 알림 헬퍼
+  //  1) 소리 (AudioContext, 외부 리소스 불필요)
+  //  2) 브라우저 desktop notification (requireInteraction 으로 클릭까지 고정)
+  //  3) 웹훅 POST (ntfy.sh / Discord / Slack 등 — 핸드폰 푸시)
+  // =========================================================
+  function playHuntAlarm() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const ctx = new AC();
+      let t = ctx.currentTime;
+      // 3번 반복 beep (800Hz → 1200Hz 교차)
+      for (let i = 0; i < 3; i++) {
+        for (const freq of [800, 1200]) {
+          const osc  = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, t);
+          gain.gain.exponentialRampToValueAtTime(0.3, t + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.start(t); osc.stop(t + 0.2);
+          t += 0.22;
+        }
+        t += 0.1;
+      }
+    } catch (_) {}
+  }
+
+  function showHuntDesktopNotification(title, body) {
+    if (!('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'granted') {
+        const n = new Notification(title, { body, requireInteraction: true });
+        n.onclick = () => { window.focus(); n.close(); };
+      } else if (Notification.permission === 'default') {
+        Notification.requestPermission().then(p => {
+          if (p === 'granted') {
+            const n = new Notification(title, { body, requireInteraction: true });
+            n.onclick = () => { window.focus(); n.close(); };
+          }
+        });
+      }
+    } catch (_) {}
+  }
+
+  async function sendHuntWebhook(url, message) {
+    if (!url) return;
+    // 여러 서비스 호환용 — 대부분 text/plain body 나 JSON 하나는 처리함
+    // ntfy.sh: 그냥 body 만 보내면 됨. Discord/Slack: JSON 필요.
+    const isDiscord = /discord\.com\/api\/webhooks/i.test(url);
+    const isSlack   = /hooks\.slack\.com\//i.test(url);
+    try {
+      if (isDiscord) {
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: message }),
+        });
+      } else if (isSlack) {
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: message }),
+        });
+      } else {
+        // ntfy.sh / 기타 — plain text body
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain', 'Title': '좌석 잡힘!', 'Priority': 'urgent' },
+          body: message,
+        });
+      }
+      log(`[HUNT] webhook 전송 완료 → ${url.replace(/\/[^/]+$/, '/***')}`);
+    } catch (e) {
+      warn(`[HUNT] webhook 전송 실패: ${e.message}`);
+    }
+  }
+
+  function showHuntSuccessBanner(seatDesc) {
+    const b = document.createElement('div');
+    b.style.cssText = [
+      'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
+      'background:#c0392b', 'color:#fff',
+      'padding:20px', 'font:700 18px system-ui',
+      'text-align:center', 'box-shadow:0 4px 20px rgba(0,0,0,.5)',
+      'border-bottom:3px solid #fff',
+    ].join(';');
+    b.innerHTML = `🎯 좌석 잡힘! · ${seatDesc}<br><span style="font-size:13px;font-weight:normal">좌석선택완료는 수동으로 진행하세요 (Enter 키)</span>`;
+    (document.body || document.documentElement).appendChild(b);
+  }
+
+  async function notifyHuntSuccess(seatDesc) {
+    log(`[HUNT] 🎯 좌석 잡힘! ${seatDesc}`);
+    playHuntAlarm();
+    showHuntDesktopNotification('🎯 좌석 잡힘!', `${seatDesc}\n좌석선택완료는 수동으로 진행하세요.`);
+    showHuntSuccessBanner(seatDesc);
+    if (S.HUNT_WEBHOOK_URL) await sendHuntWebhook(S.HUNT_WEBHOOK_URL, `🎯 인터파크 좌석 잡힘: ${seatDesc}`);
+  }
 
   // =========================================================
   // triggerBacktrack — 선호 좌석 매칭 실패 시 이전단계 버튼 클릭
@@ -447,6 +553,16 @@
       ${chk('HIDE_SOLD_OUT (매진 등급 숨김)', S.HIDE_SOLD_OUT, '__s_sold__')}
       ${chk('AUTO_FLOW — CAPTCHA 입력 후 등급 자동선택 → 좌석 자동선택 → 좌석선택완료 자동진행', S.AUTO_FLOW, '__s_auto__')}
       <hr style="border:0;border-top:1px solid #333;margin:16px 0">
+      <div style="font-size:13px;color:#ffa500;margin-bottom:6px">🎯 HUNT_MODE (취소표 헌팅)</div>
+      <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.5">
+        좌석맵에서 선호 좌석 없으면 <b>페이지 새로고침</b> 반복.<br>
+        좌석 잡히면 소리 + 데스크톱 알림 + 웹훅 발송. 좌석선택완료는 수동 (결제 세션 보존).<br>
+        HUNT_MODE 켜면 SEAT_PROFILES backtrack 은 비활성 — 한 등급/블럭만 계속 감시.
+      </div>
+      ${chk('HUNT_MODE 활성화', S.HUNT_MODE, '__s_hunt__')}
+      ${inp('HUNT_RELOAD_INTERVAL_MS (reload 간격)', 'number', S.HUNT_RELOAD_INTERVAL_MS, '__s_hunt_intv__', '너무 짧으면 서버가 bot 으로 차단. 2000~5000 권장')}
+      ${inp('HUNT_WEBHOOK_URL (핸드폰 푸시용, 옵션)', 'text', S.HUNT_WEBHOOK_URL, '__s_hunt_hook__', 'ntfy.sh/<topic명> / Discord webhook / Slack webhook 등')}
+      <hr style="border:0;border-top:1px solid #333;margin:16px 0">
       <div style="font-size:13px;color:#aaa;margin-bottom:10px">SEAT_PROFILES (우선순위 배열 · 매칭된 등급의 blocks/rows/columns 적용)</div>
       ${txt('SEAT_PROFILES (JSON 배열)',
         JSON.stringify(S.SEAT_PROFILES || [], null, 2),
@@ -508,6 +624,9 @@
         SEAT_GRADE_EXCLUDE: parseList($('__s_fexc__').value, false),
         HIDE_SOLD_OUT:      $('__s_sold__').checked,
         AUTO_FLOW:          $('__s_auto__').checked,
+        HUNT_MODE:              $('__s_hunt__').checked,
+        HUNT_RELOAD_INTERVAL_MS: Math.max(500, parseInt($('__s_hunt_intv__').value, 10) || 2500),
+        HUNT_WEBHOOK_URL:       ($('__s_hunt_hook__').value || '').trim(),
         SEAT_PREFERENCE: {
           blocks:  parseList($('__s_blks__').value, true),
           rows:    parseList($('__s_rows__').value, true),
@@ -515,6 +634,10 @@
         },
         SEAT_PROFILES: profiles,
       };
+      // HUNT_MODE 켤 때 알림 권한 미리 요청
+      if (next.HUNT_MODE && 'Notification' in window && Notification.permission === 'default') {
+        try { Notification.requestPermission(); } catch (_) {}
+      }
       storage.set(next);
       log('설정 저장됨', next);
       location.reload();
@@ -528,16 +651,18 @@
     });
   }
 
-  // AUTO_FLOW ON 일 때 상단에 상태 배너 (눈에 띄게)
-  if (S.AUTO_FLOW && document.body) {
+  // AUTO_FLOW / HUNT_MODE 상태 배너
+  if ((S.AUTO_FLOW || S.HUNT_MODE) && document.body) {
     const b = document.createElement('div');
     b.style.cssText = [
       'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
-      'background:#c33', 'color:#fff',
+      `background:${S.HUNT_MODE ? '#ffa500' : '#c33'}`, 'color:#fff',
       'padding:6px 12px', 'font:700 12px system-ui,-apple-system,sans-serif',
       'text-align:center', 'letter-spacing:1px',
     ].join(';');
-    b.textContent = '⚡ AUTO_FLOW ON · CAPTCHA 입력 후 등급→좌석→완료 자동 진행';
+    b.textContent = S.HUNT_MODE
+      ? `🎯 HUNT_MODE ON · 좌석맵 ${S.HUNT_RELOAD_INTERVAL_MS}ms 간격 새로고침 · 좌석 잡히면 알림`
+      : '⚡ AUTO_FLOW ON · CAPTCHA 입력 후 등급→좌석→완료 자동 진행';
     document.body.appendChild(b);
     setTimeout(() => b.remove(), 4000);
   }
@@ -766,10 +891,18 @@
       return;
     }
 
-    // 4. 좌석 진짜 없음 — 대기 없이 즉시 backtrack
+    // 4. 좌석 없음
     seatMapSettled = true;
     const isc = document.getElementById('ImgSeatCount');
     const iscVal = isc ? isc.value : '(없음)';
+
+    // HUNT_MODE: 이전단계 대신 reload 반복
+    if (S.HUNT_MODE && !isAutoFlowBlocked()) {
+      log(`[HUNT] 좌석 0개 (ImgSeatCount=${iscVal}) — ${S.HUNT_RELOAD_INTERVAL_MS}ms 후 새로고침`);
+      setTimeout(() => location.reload(), S.HUNT_RELOAD_INTERVAL_MS);
+      return;
+    }
+    // 기본: backtrack
     warn(`[AUTO/좌석맵] 좌석 0개 (ImgSeatCount=${iscVal}) — 즉시 이전단계`);
     if (S.AUTO_FLOW && !isAutoFlowBlocked()) {
       triggerBacktrack(`좌석맵 빈 페이지 (ImgSeatCount=${iscVal})`);
@@ -1395,25 +1528,34 @@
     if (S.AUTO_FLOW && !window.__auto_seat_done__ && !isAutoFlowBlocked()) {
       whenCaptchaResolved(async () => {
         if (window.__auto_seat_done__ || isAutoFlowBlocked()) return;
-        // tryInitSeatMap 이 이미 img.stySeat 존재 확인 후 initSeatMap 호출 →
-        // 좌석 렌더 대기 불필요. 즉시 autoPick.
+
+        // 실패 시 처리 헬퍼 — HUNT_MODE 면 reload, 아니면 backtrack
+        const onFailure = async (reason) => {
+          if (S.HUNT_MODE) {
+            log(`[HUNT] ${reason} → ${S.HUNT_RELOAD_INTERVAL_MS}ms 후 새로고침`);
+            await wait(S.HUNT_RELOAD_INTERVAL_MS);
+            location.reload();
+          } else {
+            await triggerBacktrack(reason);
+          }
+        };
+
         const availableCount = allSeats().filter(isAvailable).length;
         if (availableCount === 0) {
-          warn('[AUTO] 빈자리 없음 — 등급 rc 와 실제 좌석 불일치');
-          await triggerBacktrack('빈자리 없음');
+          warn('[AUTO] 빈자리 없음');
+          await onFailure('빈자리 없음');
           return;
         }
         log(`[AUTO] 좌석 ${allSeats().length}개 · 가용 ${availableCount} → autoPick`);
 
-        // autoPick 내부에서 좌석들을 50ms 간격으로 순차 클릭
         const picked = await autoPick();
         if (!picked) {
-          await triggerBacktrack('선호 좌석 매칭 실패');
+          await onFailure('선호 좌석 매칭 실패');
           return;
         }
         window.__auto_seat_done__ = true;
 
-        // SelectSeatKBO 는 AJAX 라 서버 반영 대기 — selected count 가 TICKET_COUNT 될 때까지 폴링
+        // 서버 반영 대기
         const deadline = Date.now() + 2000;
         while (Date.now() < deadline) {
           const sel = allSeats().filter(isSelected).length;
@@ -1426,13 +1568,18 @@
           return;
         }
 
-        // 성공 — AUTO_FLOW 완료 플래그 세팅. 이 팝업 생명동안 AUTO_FLOW
-        // 재진입 금지 (결제 페이지 등에서 tryInitSeatMap 재실행돼도 skip).
-        // 팝업 닫고 새로 열면 sessionStorage 자연 초기화 → 다음 예매 fresh.
         markAutoFlowDone();
-        log(`[AUTO] AUTO_FLOW 완료 플래그 세팅 — 이 팝업에선 이후 자동동작 off`);
+        log(`[AUTO] AUTO_FLOW 완료 플래그 세팅 — 이후 자동동작 off`);
 
-        // 좌석선택완료 클릭 직전 50ms 딜레이
+        // HUNT_MODE: 좌석선택완료 자동 클릭 안 함. 알림만 쏘고 사용자 개입 대기.
+        if (S.HUNT_MODE) {
+          const titles = allSeats().filter(isSelected).map(s => s.getAttribute('title') || '').filter(Boolean);
+          const seatDesc = titles.join(' | ') || `${finalSelected}매`;
+          await notifyHuntSuccess(seatDesc);
+          return;
+        }
+
+        // 기본: 좌석선택완료 자동 클릭
         await wait(STEP_DELAY_MS);
         log(`[AUTO] ${finalSelected}매 선택 확인 → 좌석선택완료 클릭`);
         clickNext();
