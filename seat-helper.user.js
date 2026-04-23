@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         인터파크 KBO 예매 보조 (좌석/등급/CAPTCHA)
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.1.15
+// @version      2.1.16
 // @description  예매 팝업 보조 — 등급 필터, 좌석 시각화, 연속석 자동, CAPTCHA 한↔영 변환
 // @match        https://poticket.interpark.com/*
 // @match        https://ticket.interpark.com/*
@@ -701,13 +701,16 @@
     if (document.querySelector('#divSeatZoom, #divSeatArea, #SeatImg')) return true;
     return false;
   };
-  // 좌석 렌더 대기 — MutationObserver 로 img.stySeat 등장 즉시 감지.
-  // 하드 타임아웃 SEATMAP_MAX_WAIT_MS. 그 전에 나타나면 언제든 catch.
+  // 좌석 렌더 대기 — MutationObserver 로 img.stySeat 또는 #ImgSeatCount 등장
+  // 즉시 감지. 둘 다 서버 응답 완료 신호이므로 그 전에 나타나면 언제든 catch.
   //
-  // 두산 구조: BookSeat.asp (wrapper) → BookSeatDetail.asp (iframe, 실제 좌석)
-  // 우리 스크립트는 @all-frames 로 둘 다 주입됨.
-  // - BookSeatDetail 쪽에선 img.stySeat 있음 → 즉시 initSeatMap → autoPick OK
-  // - BookSeat (wrapper) 쪽에선 좌석 없음 → 자식 frame 검사로 wrapper 판정 → skip
+  // 완료 신호 2가지:
+  //   A. img.stySeat 존재 → 좌석 있음 → initSeatMap
+  //   B. #ImgSeatCount 존재 → 서버 응답 완료 signal
+  //        - value > 0 이면 좌석 있음 → initSeatMap (드문 timing 케이스)
+  //        - value === 0 이면 좌석 진짜 없음 → 즉시 backtrack (대기 불필요!)
+  //
+  // 하드 타임아웃 SEATMAP_MAX_WAIT_MS 는 안전장치 (위 신호 둘 다 안 올 때만 사용).
   const SEATMAP_MAX_WAIT_MS = 3500;
 
   // 현재 프레임 + 접근 가능한 모든 parent/child 프레임에서 img.stySeat 탐색
@@ -758,10 +761,22 @@
     if (!isSeatMapPage()) return;                    // seat map 페이지가 아님
 
     // ★ wrapper frame 즉시 감지 — 자식 iframe 에 이미 좌석 있으면 이 frame 은
-    //   wrapper 이므로 아무것도 안 함. 5s 헛된 대기 제거.
+    //   wrapper 이므로 아무것도 안 함.
     if (childFrameHasSeats()) {
       seatMapSettled = true;
       log(`[AUTO/좌석맵] 자식 frame 에 좌석 있음 — 이 frame 은 wrapper, skip (url=${location.pathname})`);
+      return;
+    }
+
+    // ★ ImgSeatCount 가 이미 있고 0 이면 서버가 "좌석 없음" 확정 리턴한 상태 →
+    //   대기 0ms 로 backtrack.
+    const iscNow = document.getElementById('ImgSeatCount');
+    if (iscNow && parseInt(iscNow.value || '0', 10) === 0) {
+      seatMapSettled = true;
+      warn(`[AUTO/좌석맵] ImgSeatCount=0 (서버 응답: 좌석 없음) — 즉시 이전단계`);
+      if (S.AUTO_FLOW && !isAutoFlowBlocked()) {
+        triggerBacktrack('좌석맵 빈 페이지 (ImgSeatCount=0)');
+      }
       return;
     }
 
@@ -790,14 +805,32 @@
         return;
       }
       // 모든 접근 가능 프레임에서 0개 — 진짜 없음
-      warn(`[AUTO/좌석맵] 모든 frame 좌석 0개 확정 (${elapsed}ms) → 이전단계`);
+      warn(`[AUTO/좌석맵] 모든 frame 좌석 0개 확정 (${elapsed}ms, ${reason}) → 이전단계`);
       if (S.AUTO_FLOW && !isAutoFlowBlocked()) {
-        triggerBacktrack('좌석맵 빈 페이지 (seat=0, all frames)');
+        triggerBacktrack(`좌석맵 빈 페이지 (seat=0, ${reason})`);
       }
     };
 
+    // MutationObserver — 둘 중 먼저 오는 신호로 즉시 finalize
     const obs = new MutationObserver(() => {
-      if (document.querySelector('img.stySeat')) finalize('MutationObserver');
+      // 1) img.stySeat 등장 — 좌석 있음
+      if (document.querySelector('img.stySeat')) {
+        finalize('img.stySeat 감지');
+        return;
+      }
+      // 2) #ImgSeatCount 등장 — 서버 응답 완료 signal
+      const isc = document.getElementById('ImgSeatCount');
+      if (isc) {
+        const v = parseInt(isc.value || '0', 10);
+        if (v > 0) {
+          // 서버는 좌석 N개 라는데 img 는 아직 안 붙은 드문 케이스 — 한번 더 tick 만 기다림
+          // (즉시 finalize 하면 initSeatMap 에서 img 0개 보고 에러날 수 있음)
+          setTimeout(() => finalize(`ImgSeatCount=${v}`), 50);
+        } else {
+          // 서버가 명시적으로 "좌석 0개" 리턴 — 대기 즉시 중단
+          finalize(`ImgSeatCount=0 (서버 응답: 좌석 없음)`);
+        }
+      }
     });
     obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
     const tmo = setTimeout(() => finalize('timeout'), SEATMAP_MAX_WAIT_MS);
