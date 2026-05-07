@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         인터파크 KBO 예매 자동화
+// @name         인터파크 KBO/LCK 예매 자동화
 // @namespace    https://github.com/wodn5515/nol-kbo-helper
-// @version      2.0.0
-// @description  인터파크 KBO 구단 페이지 — 오픈 시각 자동 감지 후 예매 버튼 고속 클릭
+// @version      2.1.1
+// @description  인터파크 스포츠 구단 페이지 (KBO/LCK 등) — 오픈 시각 자동 감지 후 예매 버튼 고속 클릭. 같은 날 복수 경기는 시간으로 구분.
 // @match        https://ticket.interpark.com/Contents/Sports/GoodsInfo*
 // @run-at       document-end
 // @grant        none
@@ -11,18 +11,22 @@
 // ==/UserScript==
 
 // ============================================================
-// 인터파크 KBO 예매 자동화
+// 인터파크 KBO/LCK 예매 자동화
 // ▶ 설치
 //   Tampermonkey 대시보드 → + → 이 파일 전체 붙여넣기 → 저장
 // ▶ 사용
-//   1) 인터파크 KBO 구단 페이지 접속 & 로그인
-//   2) 우측 상단 패널 → 경기 날짜 입력 → [시작]
+//   1) 인터파크 구단 페이지 접속 & 로그인 (KBO 구단 / LCK 등)
+//   2) 우측 상단 패널 → 경기 날짜 입력 → (옵션) 경기 시간 입력 → [시작]
 //   3) 오픈 시각 자동 감지 → 대기 → 폴링 → 발사
 // ▶ 전략
 //   POST /Contents/Sports/GoodsInfoList 직통 호출 → .timeSchedule 파싱 →
+//   날짜 + (옵션) 시간으로 타겟 경기 식별 →
 //   판매예정 텍스트("MM월 DD일 HH시 오픈")에서 오픈 시각 자동 추출 →
 //   T-2s 부터 간격 0ms 순차 폴링 (inflight 가드로 직전 응답 완료 후 즉시 다음
 //   요청, RTT 가 자연 간격) → Y 플립 순간 onclick 직접 eval
+// ▶ 시간 매칭
+//   LCK 처럼 같은 날에 1경기/2경기가 따로 있으면 [경기 시간] 칸을 채워야
+//   원하는 경기를 정확히 잡음 (KBO 처럼 하루 1경기면 비워둬도 됨)
 // ============================================================
 
 (() => {
@@ -35,6 +39,7 @@
   const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000;
   const AUTO_FIRE             = true;
   const LS_KEY_DATE           = 'interpark_autoclick_target_date';
+  const LS_KEY_TIME           = 'interpark_autoclick_target_time';
   const LS_KEY_AUTOSTART      = 'interpark_autoclick_autostart';
   // ================================
 
@@ -103,17 +108,36 @@
   }
 
   // ---- 타겟 경기 찾기 ------------------------------------------------------
-  function findScheduleInDoc(doc, targetMM, targetDD) {
+  // .scheduleDate / .scheduleTime 공통 — .num 자식들을 문자열로 합침
+  // num0..num9 → 숫자, dot → ".", colon → ":"
+  function parseNumDigits(rootEl) {
+    return Array.from(rootEl.querySelectorAll('.num')).map(n => {
+      if (n.classList.contains('dot'))   return '.';
+      if (n.classList.contains('colon')) return ':';
+      const m = n.className.match(/num(\d)/);
+      return m ? m[1] : '';
+    }).join('');
+  }
+
+  function findScheduleInDoc(doc, targetMM, targetDD, targetHour, targetMin) {
     const blocks = doc.querySelectorAll('.timeSchedule');
     for (const el of blocks) {
-      const digits = Array.from(el.querySelectorAll('.scheduleDate .num')).map(n => {
-        if (n.classList.contains('dot')) return '.';
-        const m = n.className.match(/num(\d)/);
-        return m ? m[1] : '';
-      }).join('');
-      const [mmStr, ddStr] = digits.split('.');
+      // 날짜 매칭
+      const dateEl = el.querySelector('.scheduleDate');
+      if (!dateEl) continue;
+      const [mmStr, ddStr] = parseNumDigits(dateEl).split('.');
       if (!mmStr || !ddStr) continue;
       if (parseInt(mmStr, 10) !== targetMM || parseInt(ddStr, 10) !== targetDD) continue;
+
+      // 시간 매칭 (옵션) — LCK 처럼 같은 날 복수 경기 구분
+      if (targetHour != null) {
+        const timeEl = el.querySelector('.scheduleTime');
+        if (!timeEl) continue;
+        const [hhStr, miStr] = parseNumDigits(timeEl).split(':');
+        if (!hhStr) continue;
+        if (parseInt(hhStr, 10) !== targetHour) continue;
+        if (targetMin != null && parseInt(miStr || '0', 10) !== targetMin) continue;
+      }
 
       const bookBtn = el.querySelector('a[onclick*="SportsBooking"]');
       if (bookBtn) return { state: 'open', onclick: bookBtn.getAttribute('onclick') };
@@ -178,12 +202,16 @@
   function renderSetup() {
     stopCountdown();
     const p = ensurePanel();
-    const saved    = localStorage.getItem(LS_KEY_DATE) || '';
-    const autoOn   = localStorage.getItem(LS_KEY_AUTOSTART) === '1';
+    const savedDate = localStorage.getItem(LS_KEY_DATE) || '';
+    const savedTime = localStorage.getItem(LS_KEY_TIME) || '';
+    const autoOn    = localStorage.getItem(LS_KEY_AUTOSTART) === '1';
     p.innerHTML = `
-      <div style="font-weight:700;font-size:15px;margin-bottom:12px">⚾ KBO 예매 자동화</div>
+      <div style="font-weight:700;font-size:15px;margin-bottom:12px">🎟 KBO/LCK 예매 자동화</div>
       <label style="display:block;margin-bottom:4px;font-size:12px;color:#aaa">경기 날짜</label>
-      <input id="__ap_date__" type="date" value="${saved}"
+      <input id="__ap_date__" type="date" value="${savedDate}"
+        style="width:100%;padding:8px;border:1px solid #444;background:#0d0d0d;color:#fff;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:10px">
+      <label style="display:block;margin-bottom:4px;font-size:12px;color:#aaa">경기 시간 <span style="color:#666">(같은 날 2경기일 때만)</span></label>
+      <input id="__ap_time__" type="time" value="${savedTime}"
         style="width:100%;padding:8px;border:1px solid #444;background:#0d0d0d;color:#fff;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:10px">
       <label style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:#aaa;cursor:pointer">
         <input id="__ap_auto__" type="checkbox" ${autoOn ? 'checked' : ''}> 다음 새로고침부터 자동 시작
@@ -193,16 +221,19 @@
         시작
       </button>
       <div style="margin-top:10px;font-size:11px;color:#888;line-height:1.5">
-        오픈 시각은 자동 감지됨.<br>탭 포그라운드 유지 권장.
+        오픈 시각은 자동 감지됨.<br>탭 포그라운드 유지 권장.<br>
+        LCK 처럼 같은 날 1·2경기가 따로 있으면 <b>경기 시간</b> 필수.
       </div>
     `;
     document.getElementById('__ap_start__').onclick = () => {
       const date = document.getElementById('__ap_date__').value;
+      const time = document.getElementById('__ap_time__').value;  // "" or "HH:MM"
       const auto = document.getElementById('__ap_auto__').checked;
       if (!date) { alert('날짜를 입력해주세요'); return; }
       localStorage.setItem(LS_KEY_DATE, date);
+      localStorage.setItem(LS_KEY_TIME, time);
       localStorage.setItem(LS_KEY_AUTOSTART, auto ? '1' : '0');
-      run(date).catch(e => err('실행 오류:', e));
+      run(date, time).catch(e => err('실행 오류:', e));
     };
   }
 
@@ -325,7 +356,7 @@
 
   // ---- 폴링 루프 -----------------------------------------------------------
   // T-2s 부터 `응답 → 즉시 다음` 방식. inflight 가드로 순차 실행, 간격 0ms.
-  function startPolling(targetMM, targetDD, targetLocalMs) {
+  function startPolling(targetMM, targetDD, targetHH, targetMI) {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     let attempts = 0, inflight = false;
 
@@ -336,7 +367,7 @@
         try {
           const doc = await fetchScheduleDoc();
           if (fired) return;
-          const s = findScheduleInDoc(doc, targetMM, targetDD);
+          const s = findScheduleInDoc(doc, targetMM, targetDD, targetHH, targetMI);
           if (s && s.state === 'open') { onOpen(s, `ajax#${attempts}`); return; }
         } catch (e) {
           if (attempts % 10 === 1) warn(`폴링 오류: ${e.message}`);
@@ -354,7 +385,8 @@
   }
 
   // ---- 메인 ---------------------------------------------------------------
-  async function run(targetGameDate) {
+  // targetGameDate: "YYYY-MM-DD" / targetGameTime: "HH:MM" 또는 "" (옵션)
+  async function run(targetGameDate, targetGameTime) {
     if (typeof window.SportsBooking !== 'function') {
       err('이 페이지엔 SportsBooking 함수가 없습니다. GoodsInfo 페이지에서 실행하세요.');
       renderStatus('⚠️ GoodsInfo 페이지에서 실행 필요', '#c33');
@@ -364,24 +396,34 @@
     if (!m) { renderStatus(`⚠️ 날짜 형식 오류: ${targetGameDate}`, '#c33'); return; }
     const targetMM = +m[2], targetDD = +m[3];
 
+    let targetHH = null, targetMI = null;
+    if (targetGameTime) {
+      const tm = targetGameTime.match(/^(\d{1,2}):(\d{1,2})$/);
+      if (!tm) { renderStatus(`⚠️ 시간 형식 오류: ${targetGameTime}`, '#c33'); return; }
+      targetHH = +tm[1]; targetMI = +tm[2];
+    }
+
     const { sportsCode, teamCode } = getCodes();
-    log(`SportsCode=${sportsCode}, TeamCode=${teamCode}, 타겟=${targetMM}.${targetDD}`);
+    const tgtLabel = targetHH != null
+      ? `${targetMM}.${targetDD} ${String(targetHH).padStart(2,'0')}:${String(targetMI).padStart(2,'0')}`
+      : `${targetMM}.${targetDD}`;
+    log(`SportsCode=${sportsCode}, TeamCode=${teamCode}, 타겟=${tgtLabel}`);
     renderStatus('🔍 스케줄 확인 중');
 
     // (1) 라이브 DOM → (2) AJAX 확인
-    let sched = findScheduleInDoc(document, targetMM, targetDD);
+    let sched = findScheduleInDoc(document, targetMM, targetDD, targetHH, targetMI);
     log(`라이브 DOM: ${sched ? sched.state : '경기 없음'}`);
     if (!sched || sched.state === 'pending' || sched.state === 'unknown') {
       try {
         const doc = await fetchScheduleDoc();
-        const s2 = findScheduleInDoc(doc, targetMM, targetDD);
+        const s2 = findScheduleInDoc(doc, targetMM, targetDD, targetHH, targetMI);
         log(`AJAX: ${s2 ? s2.state : '경기 없음'}`);
         if (s2) sched = s2;
       } catch (e) { warn(`AJAX 초기 로드 실패: ${e.message}`); }
     }
 
     if (!sched) {
-      renderStatus(`⚠️ ${targetMM}.${targetDD} 경기 없음<br><span style="font-size:11px">PageSize=${AJAX_PAGE_SIZE} 넘어간 경기일 수 있음</span>`, '#c33');
+      renderStatus(`⚠️ ${tgtLabel} 경기 없음<br><span style="font-size:11px">PageSize=${AJAX_PAGE_SIZE} 넘어간 경기일 수 있음</span>`, '#c33');
       return;
     }
     if (sched.state === 'open')    { onOpen(sched, 'initial'); return; }
@@ -408,16 +450,17 @@
       stopKeepalive();
       log('📡 폴링 개시');
       renderStatus('📡 폴링 중...', '#f80');
-      startPolling(targetMM, targetDD, targetLocalMs);
+      startPolling(targetMM, targetDD, targetHH, targetMI);
     });
   }
 
   // ---- 부팅 ---------------------------------------------------------------
   const savedDate    = localStorage.getItem(LS_KEY_DATE);
+  const savedTime    = localStorage.getItem(LS_KEY_TIME) || '';
   const autoStart    = localStorage.getItem(LS_KEY_AUTOSTART) === '1';
   if (savedDate && autoStart) {
-    log(`자동 시작 (저장된 날짜: ${savedDate})`);
-    run(savedDate).catch(e => err('실행 오류:', e));
+    log(`자동 시작 (저장된 날짜: ${savedDate}${savedTime ? ' ' + savedTime : ''})`);
+    run(savedDate, savedTime).catch(e => err('실행 오류:', e));
   } else {
     renderSetup();
   }

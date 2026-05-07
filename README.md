@@ -1,10 +1,10 @@
-# 인터파크 KBO 예매 보조 스크립트
+# 인터파크 KBO/LCK 예매 보조 스크립트
 
-인터파크 두산 베어스 KBO 티켓 예매를 돕는 Tampermonkey 유저스크립트 2종.
+인터파크 KBO·LCK 등 스포츠 티켓 예매를 돕는 Tampermonkey 유저스크립트 2종.
 
 | 스크립트 | 동작 페이지 | 역할 |
 |---|---|---|
-| `interpark-autoclick.user.js` | `ticket.interpark.com/Contents/Sports/GoodsInfo` | 오픈 시각 자동 감지 후 예매 버튼 고속 클릭 |
+| `interpark-autoclick.user.js` | `ticket.interpark.com/Contents/Sports/GoodsInfo` (KBO 구단·LCK 등) | 오픈 시각 자동 감지 후 예매 버튼 고속 클릭. 같은 날 복수 경기는 시간으로 구분 |
 | `seat-helper.user.js` | `poticket.interpark.com` (예매 팝업) + 팀 페이지 | 등급 필터 · 좌석 시각화 · CAPTCHA 보조 · AUTO_FLOW · SEAT_PROFILES |
 
 ## 사전 준비
@@ -36,20 +36,27 @@ https://raw.githubusercontent.com/wodn5515/nol-kbo-helper/master/seat-helper.use
 **언제**: 오픈되지 않은 경기를 예매하려 할 때 (판매예정 상태)
 
 ### 절차
-1. 인터파크 KBO 구단 페이지 접속 & 로그인
+1. 인터파크 구단 페이지 접속 & 로그인
    ```
+   # KBO 두산
    https://ticket.interpark.com/Contents/Sports/GoodsInfo?SportsCode=07001&TeamCode=PB004
+   # LCK
+   https://ticket.interpark.com/Contents/Sports/GoodsInfo?SportsCode=07032&TeamCode=PE015
    ```
-2. 우측 상단 자동 패널 → **경기 날짜 선택** → **[시작]**
+2. 우측 상단 자동 패널 → **경기 날짜 선택** → (필요 시) **경기 시간 입력** → **[시작]**
 3. 스크립트가 자동으로:
+   - 날짜 + (옵션) 시간으로 타겟 경기 블럭 식별 (`.scheduleDate`/`.scheduleTime` 매칭)
    - 해당 경기 블럭의 "MM월 DD일 HH시 오픈" 문구 파싱해서 오픈 시각 추출
    - 서버 시각 동기화 (Date 헤더 기준 offset)
    - 카운트다운 타이머 + keep-alive 핑 (10분 간격)
    - **T-2s 부터 0ms 간격 순차 폴링** (`POST /Contents/Sports/GoodsInfoList`)
    - 서버가 "Y"(판매중) 로 플립하는 순간 `SportsBooking(...)` 직접 호출 → 예매 팝업 오픈
 
+### 같은 날 복수 경기 (LCK 등)
+LCK 처럼 하루에 1경기·2경기가 따로 잡히는 종목은 **경기 시간 칸을 반드시 채워야** 원하는 경기를 잡습니다 (예: 1경기 `17:00`, 2경기 `19:00`). KBO처럼 하루 한 경기면 비워둬도 OK.
+
 ### 옵션
-- **"다음 새로고침부터 자동 시작"** 체크박스: 탭 재방문 시 입력 없이 자동 시작. 전날 저녁 세팅하고 자는 시나리오에 유용.
+- **"다음 새로고침부터 자동 시작"** 체크박스: 탭 재방문 시 입력 없이 자동 시작. 전날 저녁 세팅하고 자는 시나리오에 유용. (날짜·시간 모두 저장됨)
 
 ### Tips
 - 탭을 **포그라운드 유지** (백그라운드 스로틀링 방지)
@@ -107,7 +114,7 @@ CAPTCHA 입력 후 등급 → 좌석 → 좌석선택완료까지 자동:
 ## 설정 커스터마이징
 
 ### `interpark-autoclick`
-날짜만 입력 (패널 UI → localStorage). 고급 설정 없음.
+날짜 + (옵션) 시간 입력 (패널 UI → localStorage). 고급 설정 없음.
 
 ### `seat-helper` — 🐵 메뉴 → "⚙️ 설정 열기"
 
